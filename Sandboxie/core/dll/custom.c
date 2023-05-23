@@ -27,7 +27,7 @@
 
 
 //---------------------------------------------------------------------------
-// Fuctions
+// Functions
 //---------------------------------------------------------------------------
 
 
@@ -41,6 +41,7 @@ static BOOLEAN  DisableRecycleBin(void);
 static BOOLEAN  DisableWinRS(void);
 static BOOLEAN  DisableWerFaultUI(void);
 static BOOLEAN  EnableMsiDebugging(void);
+static BOOLEAN  DisableEdgeBoost(void);
 static BOOLEAN  Custom_EnableBrowseNewProcess(void);
 static BOOLEAN  Custom_DisableBHOs(void);
 static BOOLEAN  Custom_OpenWith(void);
@@ -74,8 +75,8 @@ _FX BOOLEAN CustomizeSandbox(void)
 
     if ((Dll_ProcessFlags & SBIE_FLAG_PRIVACY_MODE) != 0) {
 
-        Key_CreateBaseKeys();
-        //Key_CreateBaseFolders(); // no longer needed those paths will be created on demand
+        //Key_CreateBaseKeys();
+        File_CreateBaseFolders();
     }
 
     if (GetSetCustomLevel(0) != '2') {
@@ -87,6 +88,7 @@ _FX BOOLEAN CustomizeSandbox(void)
             DisableWinRS();
         DisableWerFaultUI();
         EnableMsiDebugging();
+        DisableEdgeBoost();
         Custom_EnableBrowseNewProcess();
         DeleteShellAssocKeys(0);
         Custom_DisableBHOs();
@@ -173,6 +175,20 @@ _FX UCHAR GetSetCustomLevel(UCHAR SetLevel)
             Sbie_snwprintf(path, 256, L"%d [%08X]", -2, status);
             SbieApi_Log(2206, path);
         }
+
+        //
+        // if UseRegDeleteV2 is set, check if RegPaths.dat was loaded
+        // if not it means the box was previusly a V1 box,
+        // hence return 0 and re run customization
+        // 
+        // note: DeleteShellAssocKeys deletes the sandboxie shell integration keys
+        // so the existence of a RegPaths.dat in a customized box is a reliable indicator
+        //
+
+        extern BOOLEAN Key_Delete_v2;
+        extern BOOLEAN Key_RegPaths_Loaded;
+        if (Key_Delete_v2 && !Key_RegPaths_Loaded)
+            return 0;
 
     } else if (AutoExecHKey) {
 
@@ -439,6 +455,44 @@ _FX BOOLEAN EnableMsiDebugging(void)
                 NtClose(hKeyMSI);
             }
             NtClose(hKeyWin);
+        }
+        NtClose(hKeyRoot);
+    }
+
+    return TRUE;
+}
+
+
+//---------------------------------------------------------------------------
+// DisableEdgeBoost
+//
+// Disable edge startup boost
+//---------------------------------------------------------------------------
+
+
+_FX BOOLEAN DisableEdgeBoost(void)
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objattrs;
+    UNICODE_STRING uni;
+    HANDLE hKeyRoot;
+    HANDLE hKeyEdge;
+
+    // Open HKLM
+    RtlInitUnicodeString(&uni, Custom_PrefixHKLM);
+    InitializeObjectAttributes(&objattrs, &uni, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (NtOpenKey(&hKeyRoot, KEY_READ, &objattrs) == STATUS_SUCCESS)
+    {
+        // open/create WER parent key
+        RtlInitUnicodeString(&uni, L"SOFTWARE\\Policies\\Microsoft\\Edge");
+        InitializeObjectAttributes(&objattrs, &uni, OBJ_CASE_INSENSITIVE, hKeyRoot, NULL);
+        if (Key_OpenOrCreateIfBoxed(&hKeyEdge, KEY_ALL_ACCESS, &objattrs) == STATUS_SUCCESS)
+        {
+            DWORD StartupBoostEnabled = 0;
+            RtlInitUnicodeString(&uni, L"StartupBoostEnabled");
+            status = NtSetValueKey(hKeyEdge, &uni, 0, REG_DWORD, &StartupBoostEnabled, sizeof(StartupBoostEnabled));
+
+            NtClose(hKeyEdge);
         }
         NtClose(hKeyRoot);
     }
@@ -866,7 +920,11 @@ _FX HANDLE OpenExplorerKey(
 
     InitializeObjectAttributes(
         &objattrs, &uni, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    status = NtOpenKey(&HKey_Root, KEY_READ, &objattrs);
+    status = Key_OpenOrCreateIfBoxed(&HKey_Root, KEY_READ, &objattrs);
+    if (status == STATUS_BAD_INITIAL_PC) {
+        *error = 0;
+        return INVALID_HANDLE_VALUE;
+    }
 
     if (status != STATUS_SUCCESS) {
         *error = 0x99;
@@ -880,7 +938,11 @@ _FX HANDLE OpenExplorerKey(
     RtlInitUnicodeString(&uni, _Explorer);
     InitializeObjectAttributes(
         &objattrs, &uni, OBJ_CASE_INSENSITIVE, HKey_Root, NULL);
-    status = NtOpenKey(&HKey_Explorer, KEY_READ, &objattrs);
+    status = Key_OpenOrCreateIfBoxed(&HKey_Explorer, KEY_READ, &objattrs);
+    if (status == STATUS_BAD_INITIAL_PC) {
+        *error = 0;
+        return INVALID_HANDLE_VALUE;
+    }
 
     NtClose(HKey_Root);
 
@@ -897,9 +959,7 @@ _FX HANDLE OpenExplorerKey(
     InitializeObjectAttributes(
         &objattrs, &uni, OBJ_CASE_INSENSITIVE, HKey_Explorer, NULL);
 
-    status = Key_OpenOrCreateIfBoxed(
-                    &HKey_Subkey, KEY_ALL_ACCESS, &objattrs);
-
+    status = Key_OpenOrCreateIfBoxed(&HKey_Subkey, KEY_ALL_ACCESS, &objattrs);
     if (status == STATUS_BAD_INITIAL_PC) {
         *error = 0;
         return INVALID_HANDLE_VALUE;
@@ -1006,19 +1066,11 @@ _FX void AutoExec(void)
     NTSTATUS status;
     UNICODE_STRING uni;
     WCHAR error_str[16];
-    WCHAR *buf1, *buf2;
+    WCHAR* buf1;
     ULONG buf_len;
     ULONG index;
     KEY_VALUE_BASIC_INFORMATION basic_info;
     ULONG len;
-
-    //
-    // only do AutoExec processing in the context of the
-    // first process in the box
-    //
-
-    if (! Dll_FirstProcessInBox)
-        return;
 
     //
     // query the values in the AutoExec setting
@@ -1027,8 +1079,6 @@ _FX void AutoExec(void)
     buf_len = 4096 * sizeof(WCHAR);
     buf1 = Dll_AllocTemp(buf_len);
     memzero(buf1, buf_len);
-    buf2 = Dll_AllocTemp(buf_len);
-    memzero(buf2, buf_len);
 
     index = 0;
 
@@ -1039,16 +1089,11 @@ _FX void AutoExec(void)
         if (status != 0)
             break;
 
-        len = ExpandEnvironmentStrings(
-            buf1, buf2, buf_len / sizeof(WCHAR) - 16);
-        if (len == 0 || len > buf_len / sizeof(WCHAR) - 16)
-            wcscpy(buf2, buf1);
-
         //
         // check the key value matching the setting value
         //
 
-        RtlInitUnicodeString(&uni, buf2);
+        RtlInitUnicodeString(&uni, buf1);
 
         if (AutoExecHKey) {
             status = NtQueryValueKey(
@@ -1066,7 +1111,7 @@ _FX void AutoExec(void)
 
             if (NT_SUCCESS(status)) {
 
-                SbieDll_ExpandAndRunProgram(buf2);
+                SbieDll_ExpandAndRunProgram(buf1);
 
             } else {
                 Sbie_snwprintf(error_str, 16, L"%d [%08X]", index, status);
@@ -1082,7 +1127,6 @@ _FX void AutoExec(void)
     //
 
     Dll_Free(buf1);
-    Dll_Free(buf2);
 }
 
 
@@ -1094,7 +1138,7 @@ _FX void AutoExec(void)
 _FX BOOLEAN SbieDll_ExpandAndRunProgram(const WCHAR *Command)
 {
     ULONG len;
-    WCHAR *cmdline;
+    WCHAR *cmdline, *cmdline2;
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
     BOOL ok;
@@ -1112,6 +1156,51 @@ _FX BOOLEAN SbieDll_ExpandAndRunProgram(const WCHAR *Command)
     cmdline[len] = L'\0';
 
     //
+    // expand sandboxie variables
+    //
+
+    len = 8192 * sizeof(WCHAR);
+    cmdline2 = Dll_AllocTemp(len);
+
+	const WCHAR* ptr1 = cmdline;
+	WCHAR* ptr2 = cmdline2;
+	for (;;) {
+		const WCHAR* ptr = wcschr(ptr1, L'%');
+		if (!ptr)
+			break;
+		const WCHAR* end = wcschr(ptr + 1, L'%');
+		if (!end) 
+			break;
+
+		if (ptr != ptr1) { // copy static portion unless we start with a %
+			ULONG length = (ULONG)(ptr - ptr1);
+			wmemcpy(ptr2, ptr1, length);
+			ptr2 += length;
+		}
+		ptr1 = end + 1;
+
+		ULONG length = (ULONG)(end - ptr + 1);
+		if (length <= 64) {
+			WCHAR Var[66];
+			wmemcpy(Var, ptr, length);
+			Var[length] = L'\0';
+			if (NT_SUCCESS(SbieApi_QueryConf(NULL, Var, CONF_JUST_EXPAND, ptr2, len - ((ptr2 - cmdline2) * sizeof(WCHAR))))) {
+				if (_wcsnicmp(ptr2, L"\\Device\\", 8) == 0)
+					SbieDll_TranslateNtToDosPath(ptr2);
+				ptr2 += wcslen(ptr2);
+				continue; // success - look for the next one
+			}
+		}
+		
+		// fallback - not found keep the %something%
+		wmemcpy(ptr2, ptr, length);
+		ptr2 += len;
+	}
+	wcscpy(ptr2, ptr1); // copy what's left
+
+    Dll_Free(cmdline);
+
+    //
     // execute command line
     //
 
@@ -1122,9 +1211,9 @@ _FX BOOLEAN SbieDll_ExpandAndRunProgram(const WCHAR *Command)
     memzero(&pi, sizeof(PROCESS_INFORMATION));
 
     ok = CreateProcess(
-            NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+            NULL, cmdline2, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
 
-    Dll_Free(cmdline);
+    Dll_Free(cmdline2);
 
     if (ok) {
 
@@ -1367,7 +1456,11 @@ _FX BOOLEAN Custom_OsppcDll(HMODULE module)
     ULONG zero = 0;
     ULONG ProductIndex, ValueIndex;
 
-    ULONG Wow64 = Dll_IsWow64 ? KEY_WOW64_64KEY : 0;
+    ULONG Wow64 = 0;
+#ifndef _WIN64
+    if (Dll_IsWow64)
+        Wow64 = KEY_WOW64_64KEY;
+#endif
 
     //
     // open Microsoft Office 2010 registry key
@@ -1376,9 +1469,7 @@ _FX BOOLEAN Custom_OsppcDll(HMODULE module)
     InitializeObjectAttributes(
         &objattrs, &uni, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
-    RtlInitUnicodeString(&uni,
-        L"\\registry\\user\\current\\software"
-            L"\\Microsoft\\Office\\14.0");
+    RtlInitUnicodeString(&uni, L"\\registry\\user\\current\\software\\Microsoft\\Office\\14.0");
 
     status = Key_OpenIfBoxed(&hOfficeKey, KEY_ALL_ACCESS | Wow64, &objattrs);
     if (! NT_SUCCESS(status))
@@ -1444,6 +1535,7 @@ _FX BOOLEAN Custom_OsppcDll(HMODULE module)
     return TRUE;
 }
 
+#ifndef _M_ARM64
 
 //---------------------------------------------------------------------------
 // Custom_InternetDownloadManager
@@ -1648,3 +1740,5 @@ _FX BOOLEAN Acscmonitor_Init(HMODULE hDll)
 		CloseHandle(ThreadHandle); 
     return TRUE;
 }
+
+#endif

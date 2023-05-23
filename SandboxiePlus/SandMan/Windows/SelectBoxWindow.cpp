@@ -4,6 +4,7 @@
 #include "../MiscHelpers/Common/Settings.h"
 #include "../SbiePlusAPI.h"
 #include "../Views/SbieView.h"
+#include "../MiscHelpers/Common/Finder.h"
 
 #if defined(Q_OS_WIN)
 #include <wtypes.h>
@@ -87,8 +88,10 @@ CSelectBoxWindow::CSelectBoxWindow(const QStringList& Commands, const QString& B
 	ui.setupUi(this);
 	this->setWindowTitle(tr("Sandboxie-Plus - Run Sandboxed"));
 
+	ui.treeBoxes->setAlternatingRowColors(theConf->GetBool("Options/AltRowColors", false));
 
 	connect(ui.radBoxed, SIGNAL(clicked(bool)), this, SLOT(OnBoxType()));
+	connect(ui.radBoxedNew, SIGNAL(clicked(bool)), this, SLOT(OnBoxType()));
 	connect(ui.radUnBoxed, SIGNAL(clicked(bool)), this, SLOT(OnBoxType()));
 
 	connect(ui.buttonBox, SIGNAL(accepted()), SLOT(OnRun()));
@@ -96,41 +99,16 @@ CSelectBoxWindow::CSelectBoxWindow(const QStringList& Commands, const QString& B
 
 	connect(ui.treeBoxes, SIGNAL(itemDoubleClicked(QTreeWidgetItem*, int)), this, SLOT(OnBoxDblClick(QTreeWidgetItem*)));
 
-	QList<CSandBoxPtr> Boxes = theAPI->GetAllBoxes().values(); // map is sorted by key (box name)
-	QMap<QString, QStringList> Groups = theGUI->GetBoxView()->GetGroups();
+	QWidget* pWidget = new QWidget();
+	QVBoxLayout* pLayout = new QVBoxLayout(pWidget);
+	pLayout->setContentsMargins(0, 0, 0, 0);
+	pLayout->addWidget(new CFinder(this, pWidget, 0));
+	ui.treeBoxes->parentWidget()->layout()->replaceWidget(ui.treeBoxes, pWidget);
+	pLayout->insertWidget(0, ui.treeBoxes);
+	
+	LoadBoxed("", BoxName);
 
-	if (theConf->GetBool("MainWindow/BoxTree_UseOrder", false)) {
-		QMultiMap<double, CSandBoxPtr> Boxes2;
-		foreach(const CSandBoxPtr &pBox, Boxes) {
-			Boxes2.insertMulti(CSelectBoxWindow__GetBoxOrder(Groups, pBox->GetName()), pBox);
-		}
-		Boxes = Boxes2.values();
-	}
-
-	QMap<QString, QTreeWidgetItem*> GroupItems;
-	foreach(const CSandBoxPtr &pBox, Boxes) 
-	{
-		if (!pBox->IsEnabled() || !pBox->GetBool("ShowForRunIn", true))
-			continue;
-
-		CSandBoxPlus* pBoxEx = qobject_cast<CSandBoxPlus*>(pBox.data());
-
-		QTreeWidgetItem* pParent = CSelectBoxWindow__GetBoxParent(Groups, GroupItems, ui.treeBoxes, pBox->GetName());
-		
-		QTreeWidgetItem* pItem = new QTreeWidgetItem();
-		pItem->setText(0, pBox->GetName().replace("_", " "));
-		pItem->setData(0, Qt::UserRole, pBox->GetName());
-		pItem->setData(0, Qt::DecorationRole, theGUI->GetBoxIcon(pBoxEx->GetType(), pBox->GetActiveProcessCount()));
-		if (pParent)
-			pParent->addChild(pItem);
-		else
-			ui.treeBoxes->addTopLevelItem(pItem);
-
-		if (pBox->GetName().compare(BoxName, Qt::CaseInsensitive) == 0)
-			ui.treeBoxes->setCurrentItem(pItem);
-	}
-
-	ui.treeBoxes->expandAll();
+	ui.treeBoxes->setFocus();
 
 	//ui.treeBoxes->sortByColumn(0, Qt::AscendingOrder);
 
@@ -148,9 +126,69 @@ void CSelectBoxWindow::closeEvent(QCloseEvent *e)
 	this->deleteLater();
 }
 
+void CSelectBoxWindow::SetFilter(const QString& Exp, int iOptions, int Column)
+{
+	LoadBoxed(Exp);
+}
+
+void CSelectBoxWindow::LoadBoxed(const QString& Filter, const QString& SelectBox)
+{
+	ui.treeBoxes->clear();
+
+	QList<CSandBoxPtr> Boxes = theAPI->GetAllBoxes().values(); // map is sorted by key (box name)
+	QMap<QString, QStringList> Groups = theGUI->GetBoxView()->GetGroups();
+
+	if (theConf->GetBool("MainWindow/BoxTree_UseOrder", false)) {
+		QMultiMap<double, CSandBoxPtr> Boxes2;
+		foreach(const CSandBoxPtr &pBox, Boxes) {
+			Boxes2.insertMulti(CSelectBoxWindow__GetBoxOrder(Groups, pBox->GetName()), pBox);
+		}
+		Boxes = Boxes2.values();
+	}
+
+	QFileIconProvider IconProvider;
+	bool ColorIcons = theConf->GetBool("Options/ColorBoxIcons", false);
+
+	QMap<QString, QTreeWidgetItem*> GroupItems;
+	foreach(const CSandBoxPtr &pBox, Boxes) 
+	{
+		if (!pBox->IsEnabled() || !pBox->GetBool("ShowForRunIn", true))
+			continue;
+
+		if (!Filter.isEmpty() && !pBox->GetName().contains(Filter, Qt::CaseInsensitive))
+			continue;
+
+		CSandBoxPlus* pBoxEx = qobject_cast<CSandBoxPlus*>(pBox.data());
+
+		QTreeWidgetItem* pParent = CSelectBoxWindow__GetBoxParent(Groups, GroupItems, ui.treeBoxes, pBox->GetName());
+		
+		QTreeWidgetItem* pItem = new QTreeWidgetItem();
+		pItem->setText(0, pBox->GetName().replace("_", " "));
+		pItem->setData(0, Qt::UserRole, pBox->GetName());
+		QIcon Icon;
+		QString Action = pBox->GetText("DblClickAction");
+		if (!Action.isEmpty() && Action.left(1) != "!")
+			Icon = IconProvider.icon(QFileInfo(pBoxEx->GetCommandFile(Action)));
+		else if(ColorIcons)
+			Icon = theGUI->GetColorIcon(pBoxEx->GetColor(), pBox->GetActiveProcessCount());
+		else
+			Icon = theGUI->GetBoxIcon(pBoxEx->GetType(), pBox->GetActiveProcessCount() != 0);
+		pItem->setData(0, Qt::DecorationRole, Icon);
+		if (pParent)
+			pParent->addChild(pItem);
+		else
+			ui.treeBoxes->addTopLevelItem(pItem);
+
+		if (pBox->GetName().compare(SelectBox, Qt::CaseInsensitive) == 0)
+			ui.treeBoxes->setCurrentItem(pItem);
+	}
+
+	ui.treeBoxes->expandAll();
+}
+
 void CSelectBoxWindow::OnBoxType()
 {
-	ui.treeBoxes->setEnabled(!ui.radUnBoxed->isChecked());
+	ui.treeBoxes->setEnabled(ui.radBoxed->isChecked());
 }
 
 void CSelectBoxWindow::OnBoxDblClick(QTreeWidgetItem*)
@@ -169,6 +207,14 @@ void CSelectBoxWindow::OnRun()
 			return;
 		pItem = NULL;
 	}
+	else if (ui.radBoxedNew->isChecked())
+	{
+		BoxName = theGUI->GetBoxView()->AddNewBox(true);
+		if (BoxName.isEmpty()) {
+			close();
+			return;
+		}
+	}
 	else if (pItem == NULL) {
 		QMessageBox("Sandboxie-Plus", tr("Please select a sandbox."), QMessageBox::Information, QMessageBox::Ok, QMessageBox::NoButton, QMessageBox::NoButton, this).exec();
 		return;
@@ -184,5 +230,6 @@ void CSelectBoxWindow::OnRun()
 	}
 	//CSandMan::CheckResults(Results);
 
+	setResult(1);
 	close();
 }

@@ -48,7 +48,7 @@
 //---------------------------------------------------------------------------
 
 
-static BOOLEAN Scm_HookRegisterServiceCtrlHandler(void);
+static BOOLEAN Scm_HookRegisterServiceCtrlHandler(HMODULE module);
 
 //---------------------------------------------------------------------------
 
@@ -379,9 +379,9 @@ static const WCHAR *_TrustedInstaller = L"TrustedInstaller";
 //---------------------------------------------------------------------------
 
 
-#define SBIEDLL_HOOK_SCM(proc)                              \
-    *(ULONG_PTR *)&__sys_##proc = (ULONG_PTR)               \
-        SbieDll_Hook(#proc, __sys_##proc, Scm_##proc);      \
+#define SBIEDLL_HOOK_SCM(proc)                                      \
+    *(ULONG_PTR *)&__sys_##proc = (ULONG_PTR)                       \
+        SbieDll_Hook(#proc, __sys_##proc, Scm_##proc, module);      \
     if (! __sys_##proc) return FALSE;
 
 
@@ -609,7 +609,7 @@ _FX BOOLEAN Scm_Init_AdvApi(HMODULE module)
 
     Scm_Notify_Init(module);
 
-    return Scm_HookRegisterServiceCtrlHandler();
+    return Scm_HookRegisterServiceCtrlHandler(module);
 }
 
 
@@ -618,8 +618,12 @@ _FX BOOLEAN Scm_Init_AdvApi(HMODULE module)
 //---------------------------------------------------------------------------
 
 
-BOOLEAN Scm_HookRegisterServiceCtrlHandler(void)
+BOOLEAN Scm_HookRegisterServiceCtrlHandler(HMODULE module)
 {
+
+#ifndef _M_ARM64
+    // $HookHack$ - Custom, not automated, Hook no longer applies to later windows 10 builds
+#ifdef _WIN64
     static const UCHAR PrologW[] = {
         0x45, 0x33, 0xC9,                       // xor r9d,r9d
         0x45, 0x33, 0xC0,                       // xor r8d,r8d
@@ -630,8 +634,6 @@ BOOLEAN Scm_HookRegisterServiceCtrlHandler(void)
         0xE9                                    // jmp ...
     };
     BOOLEAN HookedRegisterServiceCtrlHandler = FALSE;
-
-#ifdef _WIN64
 
     //
     // on 64-bit Windows, ADVAPI32!RegisterServiceCtrlHandlerW is an 11-byte
@@ -662,19 +664,19 @@ BOOLEAN Scm_HookRegisterServiceCtrlHandler(void)
         }
     }
 
+    if (HookedRegisterServiceCtrlHandler)
+        return TRUE;
 #endif _WIN64
+#endif
 
     //
     // otherwise hook the four functions normally
     //
 
-    if (! HookedRegisterServiceCtrlHandler) {
-
-        SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerA);
-        SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerW);
-        SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerExA);
-        SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerExW);
-    }
+    SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerA);
+    SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerW);
+    SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerExA);
+    SBIEDLL_HOOK_SCM(RegisterServiceCtrlHandlerExW);
 
     return TRUE;
 }

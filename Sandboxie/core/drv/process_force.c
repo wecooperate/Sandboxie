@@ -90,10 +90,6 @@ PEPROCESS Process_OpenAndQuery(
 static NTSTATUS Process_TranslateDosToNt(
     const WCHAR *in_path, WCHAR **out_path, ULONG *out_len);
 
-static void Process_GetStringFromPeb(
-    PEPROCESS ProcessObject, ULONG StringOffset, ULONG StringMaxLenInChars,
-    WCHAR **OutBuffer, ULONG *OutLength);
-
 static void Process_GetCurDir(
     PEPROCESS ProcessObject, WCHAR **pCurDir, ULONG *pCurDirLen);
 
@@ -152,6 +148,7 @@ _FX BOX *Process_GetForcedStartBox(
     BOX *box;
     ULONG alert;
     BOOLEAN check_force;
+    BOOLEAN is_start_exe;
     BOOLEAN force_alert;
     BOOLEAN dfp_already_added;
     BOOLEAN same_image_name;
@@ -235,7 +232,13 @@ _FX BOX *Process_GetForcedStartBox(
 
         box = Process_CheckBoxPath(&boxes, ImagePath2);
 
-        if ((! box) && CurDir)
+        //
+        // when the process is start.exe we ignore the CurDir and DocArg
+        //
+
+        Process_IsSbieImage(ImagePath, NULL, &is_start_exe);
+
+        if ((! box) && CurDir && !is_start_exe)
             box = Process_CheckBoxPath(&boxes, CurDir);
 
         if (!box) {
@@ -243,19 +246,19 @@ _FX BOX *Process_GetForcedStartBox(
             box = Process_CheckForceFolder(
                         &boxes, ImagePath2, force_alert, &alert);
 
-            if ((! box) && CurDir && (! alert)) {
+            if ((! box) && (! alert)) {
+                box = Process_CheckForceProcess(
+                    &boxes, ImageName, force_alert, &alert);
+            }
+
+            if ((! box) && CurDir && !is_start_exe && (! alert)) {
                 box = Process_CheckForceFolder(
                         &boxes, CurDir, force_alert, &alert);
             }
 
-            if ((! box) && DocArg && (! alert)) {
+            if ((! box) && DocArg && !is_start_exe && (! alert)) {
                 box = Process_CheckForceFolder(
                         &boxes, DocArg, force_alert, &alert);
-            }
-
-            if ((! box) && (! alert)) {
-                box = Process_CheckForceProcess(
-                    &boxes, ImageName, force_alert, &alert);
             }
 
             if (box && Process_IsImmersiveProcess(
@@ -284,7 +287,7 @@ _FX BOX *Process_GetForcedStartBox(
     }
 
     //
-    // check if proces should be injected
+    // check if process should be injected
     //
 
     if ((! box) && (alert != 1) && pHostInject != NULL) {
@@ -310,12 +313,12 @@ _FX BOX *Process_GetForcedStartBox(
 
 		if ((force_alert == 0) && Conf_Get_Boolean(NULL, L"StartRunAlertDenied", 0, FALSE))
 		{
-			if(Conf_Get_Boolean(NULL, L"NotifyStartRunAccessDenied", 0, TRUE))
+			if(Conf_Get_Boolean(NULL, L"AlertStartRunAccessDenied", 0, TRUE))
 				Log_Msg_Process(MSG_1308, ImageName, NULL, SessionId, ProcessId);
 
 			box = (BOX *)-1;
 		}
-		else
+		else if ((force_alert == 0) || ((force_alert == 1) && Conf_Get_Boolean(NULL, L"NotifyForceProcessDisabled", 0, FALSE)))
 		{
 			Log_Msg_Process(MSG_1301, ImageName, NULL, SessionId, ProcessId);
 		}
@@ -686,6 +689,35 @@ _FX void Process_GetDocArg(
 
 
 //---------------------------------------------------------------------------
+// Process_GetCommandLine
+//---------------------------------------------------------------------------
+
+
+_FX void Process_GetCommandLine(
+    HANDLE ProcessId,
+    WCHAR** OutBuffer, ULONG* OutLength)
+{
+    const ULONG CmdLin_offset =
+#ifdef _WIN64
+                                0x70;   // 64-bit
+#else
+                                0x40;   // 32-bit
+#endif
+
+    PEPROCESS ProcessObject;
+    NTSTATUS status =
+        PsLookupProcessByProcessId(ProcessId, &ProcessObject);
+    if (NT_SUCCESS(status)) {
+
+        Process_GetStringFromPeb(
+                ProcessObject, CmdLin_offset, 600, OutBuffer, OutLength);
+
+        ObDereferenceObject(ProcessObject);
+    }
+}
+
+
+//---------------------------------------------------------------------------
 // Process_IsDcomLaunchParent
 //---------------------------------------------------------------------------
 
@@ -703,28 +735,19 @@ _FX BOOLEAN Process_IsDcomLaunchParent(HANDLE ParentId)
 
     if (! DcomLaunchPid) {
 
-        PEPROCESS ProcessObject;
-        NTSTATUS status =
-            PsLookupProcessByProcessId(ParentId, &ProcessObject);
-        if (NT_SUCCESS(status)) {
+        WCHAR *Buffer;
+        ULONG Length;
+        Process_GetCommandLine(ParentId, &Buffer, &Length);
+        if (Buffer && Length) {
 
-            WCHAR *Buffer;
-            ULONG Length;
-            Process_GetStringFromPeb(
-                    ProcessObject, CmdLin_offset, 600, &Buffer, &Length);
-            if (Buffer && Length) {
+            ULONG len = wcslen(Buffer);
+            if (len > 10 &&
+                    _wcsicmp(Buffer + len - 10, L"DcomLaunch") == 0) {
 
-                ULONG len = wcslen(Buffer);
-                if (len > 10 &&
-                        _wcsicmp(Buffer + len - 10, L"DcomLaunch") == 0) {
-
-                    DcomLaunchPid = ParentId;
-                }
-
-                Mem_Free(Buffer, Length);
+                DcomLaunchPid = ParentId;
             }
 
-            ObDereferenceObject(ProcessObject);
+            Mem_Free(Buffer, Length);
         }
     }
 
@@ -1020,6 +1043,9 @@ _FX void Process_CreateForceData(
         ++index1;
 
         if (! Conf_IsBoxEnabled(section, SidString, SessionId))
+            continue;
+
+        if (Conf_Get_Boolean(section, L"DisableForceRules", 0, FALSE))
             continue;
 
         //
@@ -1429,7 +1455,7 @@ static _FX void Process_CheckAlertProcess(
     box = List_Head(boxes);
     while (box) {
 
-        if (Process_CheckForceProcessList(box->box, &box->ForceProcess, name)) {
+        if (Process_CheckForceProcessList(box->box, &box->AlertProcess, name)) {
             *IsAlert = 1;
             return;
         }

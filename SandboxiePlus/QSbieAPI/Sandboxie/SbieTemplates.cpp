@@ -78,7 +78,7 @@ void CSbieTemplates::CollectObjects()
 
 	foreach(const QString objdir, objdirs)
 	{
-		wstring wobjdir = objdir.toStdWString();
+		std::wstring wobjdir = objdir.toStdWString();
 		if (wobjdir.substr(0,10) == L"\\Sessions\\" && wobjdir.length() <= 13)
 			wobjdir += L"\\BaseNamedObjects";
 
@@ -191,6 +191,13 @@ void CSbieTemplates::CollectServices()
 
 void CSbieTemplates::CollectProducts()
 {
+	BOOL is64BitOperatingSystem;
+#ifdef _WIN64
+	is64BitOperatingSystem = TRUE;
+#else // ! _WIN64
+	is64BitOperatingSystem = CSbieAPI::IsWow64();
+#endif _WIN64
+
 	m_Products.clear();
 
 	ULONG DesiredAccess = KEY_READ;
@@ -219,7 +226,9 @@ void CSbieTemplates::CollectProducts()
 			break;
 		DesiredAccess |= KEY_WOW64_32KEY;
 #else // ! _WIN64
-		break;
+		if (!is64BitOperatingSystem || (DesiredAccess & KEY_WOW64_64KEY))
+			break;
+		DesiredAccess |= KEY_WOW64_64KEY;
 #endif _WIN64
 	}
 }
@@ -329,20 +338,20 @@ bool CSbieTemplates::CheckTemplate(const QString& Name)
 {
 	QSharedPointer<CSbieIni> pTemplate = QSharedPointer<CSbieIni>(new CSbieIni("Template_" + Name, m_pAPI));
 
-	QString scan = pTemplate->GetText("Tmpl.Scan");
+	QString scan = pTemplate->GetText("Tmpl.Scan", QString(), false, false, true);
 	BOOL scanIpc = (scan.indexOf(L'i') != -1);
 	BOOL scanWin = (scan.indexOf(L'w') != -1);
 	BOOL scanSvc = (scan.indexOf(L's') != -1);
 	if (!(scanIpc || scanWin || scanSvc))
 		return false;
 
-	list<wstring> Keys, Files;
+	std::list<std::wstring> Keys, Files;
 	QList<QPair<QString, QString>> settings = pTemplate->GetIniSection(0, true);
 	for(QList<QPair<QString, QString>>::iterator I = settings.begin(); I != settings.end(); ++I)
 	{
 		QString setting = I->first;
 
-		list<wstring> *List = NULL;
+		std::list<std::wstring> *List = NULL;
 		if (scanIpc && setting.compare("OpenIpcPath", Qt::CaseInsensitive) == 0)
 			List = &m_Objects;
 		else if (scanSvc && setting.compare("Tmpl.ScanIpc", Qt::CaseInsensitive) == 0)
@@ -395,8 +404,8 @@ bool CSbieTemplates::CheckTemplate(const QString& Name)
 			}
 			//
 
-			wstring wild = value.toLower().toStdWString();
-			for (list<wstring>::iterator I = List->begin(); I != List->end(); ++I)
+			std::wstring wild = value.toLower().toStdWString();
+			for (std::list<std::wstring>::iterator I = List->begin(); I != List->end(); ++I)
 			{
 				if (wildcmpex(wild.c_str(), I->c_str()) != NULL)
 					return true;
@@ -409,7 +418,7 @@ bool CSbieTemplates::CheckTemplate(const QString& Name)
 
 bool CSbieTemplates::CheckRegistryKey(const QString& Value)
 {
-	wstring keypath = Value.toStdWString();
+	std::wstring keypath = Value.toStdWString();
 
 	OBJECT_ATTRIBUTES objattrs;
 	UNICODE_STRING objname;
@@ -428,7 +437,7 @@ bool CSbieTemplates::CheckRegistryKey(const QString& Value)
 
 bool CSbieTemplates::CheckFile(const QString& Value)
 {
-	wstring path = ExpandPath(Value).toStdWString();
+	std::wstring path = ExpandPath(Value).toStdWString();
 	if (GetFileAttributes(path.c_str()) != INVALID_FILE_ATTRIBUTES)
 		return true;
 	return false;
@@ -436,7 +445,7 @@ bool CSbieTemplates::CheckFile(const QString& Value)
 
 void CSbieTemplates::InitExpandPaths(bool WithUser)
 {
-	wstring keyPath(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\");
+	std::wstring keyPath(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\");
 	if (WithUser)
 		keyPath += L"User ";
 	keyPath += L"Shell Folders";

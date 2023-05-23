@@ -453,7 +453,7 @@ static SOCKET WSA_WSASocketW(
         else {
 
             //
-            // dont ask again on success
+            // don't ask again on success
             //
 
             WSA_WFPisBlocking = FALSE;
@@ -604,7 +604,7 @@ _FX int WSA_IsBlockedTraffic(const short *addr, int addrlen, int protocol)
 				Sbie_snwprintf(msg, 256, L"Network Traffic; Port: %u; Prot: %u; IPv4: %d.%d.%d.%d", port, protocol, 
                     ip.Data[12], ip.Data[13], ip.Data[14], ip.Data[15]);
 			}
-            SbieApi_MonitorPut2(MONITOR_NETFW | (block ? MONITOR_DENY : MONITOR_OPEN), msg, FALSE);
+            SbieApi_MonitorPutMsg(MONITOR_NETFW | (block ? MONITOR_DENY : MONITOR_OPEN), msg);
         }
 
         if (block) {
@@ -751,9 +751,9 @@ _FX int WSA_AcceptEx(
     LPOVERLAPPED lpOverlapped)
 {
     //
-    // this call can operate asynchroniusly, hence we can not simply filter here the incomming connection
-    // as we have a proepr WFP filter in the driver for now this usermode filtering implementation 
-    // will not filter incomming traffic at all, normally users ate beind NATs or other firewall so 
+    // this call can operate asynchronously, hence we can not simply filter here the incoming connection
+    // as we have a proper WFP filter in the driver for now this usermode filtering implementation 
+    // will not filter incoming traffic at all, normally users are behind NATs or other firewall so 
     // blocking only outgoing connections should be good enough
     //
 

@@ -78,6 +78,14 @@ typedef struct _WND_HOOK {
 
 } WND_HOOK;
 
+#ifndef _DPI_AWARENESS_CONTEXTS_
+struct DPI_AWARENESS_CONTEXT__ { int unused; };
+typedef DPI_AWARENESS_CONTEXT__ *DPI_AWARENESS_CONTEXT;
+#endif
+typedef DPI_AWARENESS_CONTEXT (WINAPI *P_SetThreadDpiAwarenessContext)(DPI_AWARENESS_CONTEXT dpiContext);
+
+typedef BOOL (WINAPI *P_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
+
 //---------------------------------------------------------------------------
 // Variables
 //---------------------------------------------------------------------------
@@ -85,14 +93,8 @@ typedef struct _WND_HOOK {
 
 static HWND DDE_Request_ProxyWnd = NULL;
 
-#ifndef _DPI_AWARENESS_CONTEXTS_
-struct DPI_AWARENESS_CONTEXT__ { int unused; };
-typedef DPI_AWARENESS_CONTEXT__ *DPI_AWARENESS_CONTEXT;
-#endif
-typedef DPI_AWARENESS_CONTEXT (WINAPI *P_SetThreadDpiAwarenessContext)(
-    DPI_AWARENESS_CONTEXT dpiContext);
-
 static P_SetThreadDpiAwarenessContext __sys_SetThreadDpiAwarenessContext = NULL;
+static P_SetProcessDpiAwarenessContext __sys_SetProcessDpiAwarenessContext = NULL;
 
 //---------------------------------------------------------------------------
 // Constructor
@@ -124,6 +126,15 @@ GuiServer::GuiServer()
 
     __sys_SetThreadDpiAwarenessContext = (P_SetThreadDpiAwarenessContext)GetProcAddress(
         GetModuleHandle(L"user32.dll"), "SetThreadDpiAwarenessContext");
+
+    __sys_SetProcessDpiAwarenessContext = (P_SetProcessDpiAwarenessContext)GetProcAddress(
+        GetModuleHandle(L"user32.dll"), "SetProcessDpiAwarenessContext");
+}
+
+GuiServer::~GuiServer()
+{
+	// cleanup CS
+	DeleteCriticalSection(&m_SlavesLock);
 }
 
 
@@ -543,7 +554,7 @@ typedef struct GUI_JOB {
 
     LIST_ELEM list_elem;
     HANDLE handle;
-    WCHAR boxname[64];
+    WCHAR boxname[BOXNAME_COUNT];
 
 } GUI_JOB;
 
@@ -566,6 +577,10 @@ void GuiServer::RunSlave(const WCHAR *cmdline)
     }
 
     GuiServer *pThis = GetInstance();
+
+    if (__sys_SetProcessDpiAwarenessContext) {
+        __sys_SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+    }
 
     //
     // get process id for parent (which should be the main SbieSvc process)
@@ -1070,7 +1085,7 @@ HANDLE GuiServer::GetJobObjectForAssign(const WCHAR *boxname)
                     }
 
                     //
-                    // we want to allow sandboxed processes to use jobs of thair own
+                    // we want to allow sandboxed processes to use jobs of their own
                     // with windows 8 we can have nested, a boxed process may want to use BREAKAWAY
                     // hence we no longer prevent breaking away from our job,
                     // instead we re assign the job on each initialization, like it was done for the initial one
@@ -1126,7 +1141,7 @@ HANDLE GuiServer::GetJobObjectForGrant(ULONG pid)
 {
     HANDLE hJobObject = NULL;
 
-    WCHAR BoxName[48];
+    WCHAR BoxName[BOXNAME_COUNT];
     ULONG SessionId;
     ULONG status = SbieApi_QueryProcess(
                     (HANDLE)(ULONG_PTR)pid, BoxName, NULL, NULL, &SessionId);
@@ -1345,7 +1360,7 @@ ULONG GuiServer::InitProcessSlave(SlaveArgs *args)
     ULONG errlvl;
     ULONG status;
     ULONG session_id;
-    WCHAR boxname[64];
+    WCHAR boxname[BOXNAME_COUNT];
 
     //
     // validate the request
@@ -1570,8 +1585,8 @@ ULONG GuiServer::CreateConsoleSlave(SlaveArgs *args)
     if (! hProcess)
         return STATUS_INVALID_CID;
 
-    WCHAR boxname[48];
-    WCHAR image_name[128];
+    WCHAR boxname[BOXNAME_COUNT];
+    WCHAR image_name[99];
     WCHAR *cmdline = NULL;
     HANDLE hToken1 = NULL;
     HANDLE hToken2 = NULL;
@@ -1631,7 +1646,7 @@ ULONG GuiServer::CreateConsoleSlave(SlaveArgs *args)
     }
 
     //
-    // prepare commnand line for console helper process
+    // prepare command line for console helper process
     //
 
     cmdline = (WCHAR *)HeapAlloc(
@@ -2143,7 +2158,7 @@ ULONG GuiServer::EnumWindowsFilterSlave(ULONG pid, void *rpl_buf)
     if (! rpl->num_hwnds)
         return 0;
 
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
     ULONG status = SbieApi_QueryProcess((HANDLE)(ULONG_PTR)pid,
                                         boxname, NULL, NULL, NULL);
     if (status != 0)
@@ -2483,8 +2498,8 @@ ULONG GuiServer::GetClipboardDataSlave(SlaveArgs *args)
     rpl->result = 0;
 
     // fail if the calling process should not have clipboard access
-    WCHAR boxname[48] = { 0 };
-    WCHAR exename[128] = { 0 };
+    WCHAR boxname[BOXNAME_COUNT] = { 0 };
+    WCHAR exename[99] = { 0 };
     SbieApi_QueryProcess((HANDLE)args->pid, boxname, exename, NULL, NULL);
     if (!SbieApi_QueryConfBool(boxname, L"OpenClipboard", TRUE))
     {
@@ -3151,7 +3166,7 @@ ULONG GuiServer::SplWow64Slave(SlaveArgs *args)
 
     static ULONG   _SplWow64Pid = 0;
     static ULONG64 _SplWow64CreateTime = 0;
-    static WCHAR   _SplWow64BoxName[48];
+    static WCHAR   _SplWow64BoxName[BOXNAME_COUNT];
 
     if (args->req_len != sizeof(GUI_SPLWOW64_REQ))
         return STATUS_INFO_LENGTH_MISMATCH;
@@ -3160,7 +3175,7 @@ ULONG GuiServer::SplWow64Slave(SlaveArgs *args)
 
     ULONG status;
     ULONG64 create_time;
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
 
     //
     // scenario 1:  req->set == TRUE
@@ -3179,7 +3194,7 @@ ULONG GuiServer::SplWow64Slave(SlaveArgs *args)
         _SplWow64Pid = args->pid;
         _SplWow64CreateTime = create_time;
         memcpy(_SplWow64BoxName, boxname, sizeof(_SplWow64BoxName));
-        boxname[47] = L'\0';
+        boxname[BOXNAME_COUNT - 1] = L'\0';
 
         return STATUS_SUCCESS;
     }
@@ -3417,7 +3432,7 @@ BOOL CALLBACK EnumThreadWndProc(HWND hwnd, LPARAM lParam)
     GUI_REMOVE_HOST_WINDOW_RPL* pRpl = (GUI_REMOVE_HOST_WINDOW_RPL*)lParam; // pRpl is from caller's stack.
 
     // thread window should from guest process. We only need check the first window's process.
-    // Note, GetWindowThreadProcessId is not availabe in XP.
+    // Note, GetWindowThreadProcessId is not available in XP.
     if (pRpl->status == STATUS_UNSUCCESSFUL)
     {
         if (isGuestProcessWindow(hwnd))
@@ -3754,14 +3769,14 @@ bool GuiServer::CheckSameProcessBoxes(
     if (*out_pid == in_pid)
         return true;
 
-    WCHAR boxname2[48];
+    WCHAR boxname2[BOXNAME_COUNT];
     ULONG status = SbieApi_QueryProcess((HANDLE)(ULONG_PTR)*out_pid,
                                         boxname2, NULL, NULL, NULL);
     if (! NT_SUCCESS(status))
         return false;
 
     if (! boxname) {
-        WCHAR boxname1[48];
+        WCHAR boxname1[BOXNAME_COUNT];
         status = SbieApi_QueryProcess((HANDLE)(ULONG_PTR)in_pid,
                                       boxname1, NULL, NULL, NULL);
         if (! NT_SUCCESS(status))
@@ -4325,7 +4340,7 @@ void GuiServer::RunConsoleSlave(const WCHAR *evtname)
             }
         }
 
-        //HeapFree(GetProcessHeap(), 0, pids); // dont bother we ExitProcess aynways
+        //HeapFree(GetProcessHeap(), 0, pids); // don't bother we ExitProcess aynways
     }
 
     ExitProcess(0);

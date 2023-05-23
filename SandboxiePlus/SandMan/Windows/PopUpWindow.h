@@ -3,6 +3,7 @@
 #include <QtWidgets/QMainWindow>
 #include "ui_PopUpWindow.h"
 #include "../SbiePlusAPI.h"
+#include "../SbieProcess.h"
 
 class CPopUpEntry: public QWidget
 {
@@ -455,6 +456,7 @@ protected:
 	virtual void		SendPromptResult(CPopUpPrompt* pEntry, int retval);
 
 	QMultiMap<quint32, QString> m_HiddenMessages;
+	bool				m_HideAllMessages;
 
 private:
 	bool				m_ResetPosition;

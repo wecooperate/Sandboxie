@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -42,6 +42,8 @@ static void Dll_SelectImageType(void);
 
 void Ldr_Inject_Init(BOOLEAN bHostInject);
 
+void Dll_Wow64DisableTurboThunks(void);
+
 //---------------------------------------------------------------------------
 // Variables
 //---------------------------------------------------------------------------
@@ -50,11 +52,16 @@ void Ldr_Inject_Init(BOOLEAN bHostInject);
 const ULONG tzuk = 'xobs';
 
 SBIELOW_DATA* SbieApi_data = NULL;
+#ifdef _M_ARM64EC
+ULONG* SbieApi_SyscallPtr = NULL;
+#endif
 
 HINSTANCE Dll_Instance = NULL;
 HMODULE Dll_Ntdll = NULL;
 HMODULE Dll_Kernel32 = NULL;
 HMODULE Dll_KernelBase = NULL;
+HMODULE Dll_Win32u = NULL;
+// $Workaround$ - 3rd party fix
 HMODULE Dll_DigitalGuardian = NULL;
 
 const WCHAR *Dll_BoxName = NULL;
@@ -80,24 +87,31 @@ ULONG Dll_SessionId = 0;
 
 ULONG64 Dll_ProcessFlags = 0;
 
+#ifndef _WIN64
 BOOLEAN Dll_IsWow64 = FALSE;
+#endif
+#ifdef _M_X64
+BOOLEAN Dll_IsArm64ec = FALSE;
+#endif
+#ifndef _M_ARM64
+BOOLEAN Dll_IsXtAjit = FALSE;
+#endif
 BOOLEAN Dll_IsSystemSid = FALSE;
 BOOLEAN Dll_InitComplete = FALSE;
+BOOLEAN Dll_EntryComplete = FALSE;
 BOOLEAN Dll_RestrictedToken = FALSE;
+BOOLEAN Dll_AppContainerToken = FALSE;
 BOOLEAN Dll_ChromeSandbox = FALSE;
 BOOLEAN Dll_FirstProcessInBox = FALSE;
 BOOLEAN Dll_CompartmentMode = FALSE;
+//BOOLEAN Dll_AlernateIpcNaming = FALSE;
 
 ULONG Dll_ImageType = DLL_IMAGE_UNSPECIFIED;
 
-ULONG Dll_OsBuild = 0;  // initialized by Key module
+ULONG Dll_OsBuild = 0;
 ULONG Dll_Windows = 0;
 
-#ifdef _WIN64
-CRITICAL_SECTION  VT_CriticalSection;
-#endif
-
-const UCHAR *SbieDll_Version = MY_VERSION_COMPAT;
+const UCHAR *SbieDll_Version = MY_VERSION_STRING;
 
 BOOLEAN Dll_SbieTrace = FALSE;
 
@@ -144,7 +158,8 @@ _FX BOOL WINAPI DllMain(
     if (dwReason == DLL_THREAD_ATTACH) {
 
         if (Dll_BoxName) {
-            Dll_FixWow64Syscall();
+            if (Dll_Windows < 10)
+                Dll_FixWow64Syscall();
             Gui_ConnectToWindowStationAndDesktop(NULL);
         }
 
@@ -153,19 +168,31 @@ _FX BOOL WINAPI DllMain(
         Dll_FreeTlsData();
 
     } else if (dwReason == DLL_PROCESS_ATTACH) {
+
+        // $Workaround$ - 3rd party fix
 #ifdef _WIN64
-        InitializeCriticalSection(&VT_CriticalSection);
         Dll_DigitalGuardian = GetModuleHandleA("DgApi64.dll");
 #else
         Dll_DigitalGuardian = GetModuleHandleA("DgApi.dll");
 #endif
-        if (GetProcAddress(GetModuleHandleA("ntdll.dll"), "LdrFastFailInLoaderCallout")) {
+
+        Dll_OsBuild = GET_PEB_IMAGE_BUILD;
+
+        //if (GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueueApcThreadEx2"))  // Somewhere around windows insider build 19603
+        //    Dll_Windows = 11;
+        //else if (GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtGetCurrentProcessorNumberEx"))  
+        //else 
+        if (GetProcAddress(GetModuleHandleA("ntdll.dll"), "LdrFastFailInLoaderCallout")) 
             Dll_Windows = 10;
-        }
-        else {
+        else //if (GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAlpcConnectPortEx")) 
             Dll_Windows = 8;
-        }
+        // else
+        //    Dll_Windows = 7;
+
+        ProcessIdToSessionId(GetCurrentProcessId(), &Dll_SessionId);
+
         Dll_InitGeneric(hInstance);
+        SbieDll_HookInit();
 
     } else if (dwReason == DLL_PROCESS_DETACH) {
 
@@ -174,6 +201,7 @@ _FX BOOL WINAPI DllMain(
             File_DoAutoRecover(TRUE);
             Gui_ResetClipCursor();
         }
+
     }
 
     return TRUE;
@@ -229,21 +257,12 @@ _FX void Dll_InitInjected(void)
 	ULONG BoxKeyPathLen;
 	ULONG BoxIpcPathLen;
 
-    Dll_SbieTrace = SbieApi_QueryConfBool(NULL, L"SbieTrace", FALSE);
-
-	if (SbieApi_QueryConfBool(NULL, L"DebugTrace", FALSE)) {
-
-		Trace_Init();
-
-		OutputDebugString(L"SbieDll injected...");
-	}
-
     //
     // confirm the process is sandboxed before going further
     //
 
-    Dll_BoxNameSpace        = Dll_Alloc( 64 * sizeof(WCHAR));
-    memzero(Dll_BoxNameSpace,            64 * sizeof(WCHAR));
+    Dll_BoxNameSpace        = Dll_Alloc(BOXNAME_COUNT * sizeof(WCHAR));
+    memzero(Dll_BoxNameSpace,           BOXNAME_COUNT * sizeof(WCHAR));
 
     Dll_ImageNameSpace      = Dll_Alloc(256 * sizeof(WCHAR));
     memzero(Dll_ImageNameSpace,         256 * sizeof(WCHAR));
@@ -269,6 +288,15 @@ _FX void Dll_InitInjected(void)
 
     Dll_SidStringLen = wcslen(Dll_SidString);
 
+
+    //
+    // break for the debugger, as soon as we have Dll_ImageName
+    //
+
+    Debug_Wait();
+
+    Trace_Init();
+
     //
     // query Sandboxie home folder
     //
@@ -288,6 +316,14 @@ _FX void Dll_InitInjected(void)
     Dll_ProcessFlags = SbieApi_QueryProcessInfo(0, 0);
 
     Dll_CompartmentMode = (Dll_ProcessFlags & SBIE_FLAG_APP_COMPARTMENT) != 0;
+
+    //
+    // check for restricted token types
+    //
+
+    Dll_RestrictedToken = Secure_IsRestrictedToken(FALSE);
+
+    Dll_AppContainerToken = Secure_IsAppContainerToken(NULL);
 
     Dll_SelectImageType();
 
@@ -326,6 +362,36 @@ _FX void Dll_InitInjected(void)
     Dll_BoxKeyPathLen = wcslen(Dll_BoxKeyPath);
     Dll_BoxIpcPathLen = wcslen(Dll_BoxIpcPath);
 
+  //  Dll_AlernateIpcNaming = SbieApi_QueryConfBool(NULL, L"UseAlernateIpcNaming", FALSE);
+  //  if (Dll_AlernateIpcNaming) {
+  //
+  //      //
+  //      // instead of using a separate namespace
+  //		// just replace all \ with _ and use it as a sufix rather then an actual path
+  //      // similarly a its done for named pipes already
+  //      // this approach can help to reduce the footprint when running in portable mode
+  //      // alternatively we could create volatile entries under AppContainerNamedObjects 
+  //      //
+  //
+  //      WCHAR* ptr = (WCHAR*)Dll_BoxIpcPath;
+  //      while (*ptr) {
+  //          WCHAR *ptr2 = wcschr(ptr, L'\\');
+  //          if (ptr2) {
+  //              ptr = ptr2;
+  //              *ptr = L'_';
+  //          } else
+  //              ptr += wcslen(ptr);
+  //      }
+  //  }
+
+
+#ifdef WITH_DEBUG
+    if (SbieApi_QueryConfBool(NULL, L"DisableSbieDll", FALSE)) {
+        Dll_InitComplete = TRUE;
+        return;
+    }
+#endif
+
     //
     // check if process SID is LocalSystem
     //
@@ -344,11 +410,17 @@ _FX void Dll_InitInjected(void)
 
     ok = Dll_InitPathList();
 
-    if (ok)
-        Dll_FixWow64Syscall();
+#ifndef _WIN64
+    if (ok) {
+        if (Dll_Windows < 10) 
+            Dll_FixWow64Syscall();
+        else
+            Dll_Wow64DisableTurboThunks();
+    }
+#endif
 
     if (ok)
-        ok = File_InitHandles();
+        ok = Handle_Init();
 
     if (ok)
         ok = Obj_Init();
@@ -379,6 +451,15 @@ _FX void Dll_InitInjected(void)
     if (ok) {
 
         //
+        // ipc must be initialized before anything else to make delete v2 work
+        //
+
+        ok = Ipc_Init();
+    }
+
+    if (ok) {
+
+        //
         // Key should be initialized first, to prevent key requests
         // with MAXIMUM_ALLOWED access from failing
         //
@@ -401,9 +482,6 @@ _FX void Dll_InitInjected(void)
         ok = File_Init();
 
     if (ok)
-        ok = Ipc_Init();
-
-    if (ok)
         ok = Secure_Init();
 
     if (ok)
@@ -418,7 +496,7 @@ _FX void Dll_InitInjected(void)
     if (ok)
         ok = Gui_InitConsole1();
 
-    if (ok)
+    if (ok) // Note: Ldr_Init may cause rpcss to be started early
         ok = Ldr_Init();            // last to initialize
 
     //
@@ -439,32 +517,6 @@ _FX void Dll_InitInjected(void)
 
     if (! Dll_RestrictedToken)
         CustomizeSandbox();
-
-    /*while (! IsDebuggerPresent()) {
-        OutputDebugString(L"BREAK\n");
-        Sleep(500);
-    }
-    __debugbreak();*/
-
-    /*if (_wcsicmp(Dll_ImageName, L"iexplore.exe") == 0) {
-        WCHAR *cmd = GetCommandLine();
-        if (wcsstr(cmd, L"SCODEF")) {
-
-            while (! IsDebuggerPresent()) {
-                OutputDebugString(L"BREAK\n");
-                Sleep(500);
-            }
-            __debugbreak();
-        }
-    }*/
-
-    /*if (_wcsicmp(Dll_ImageName, L"dllhost.exe") == 0) {
-            while (! IsDebuggerPresent()) {
-                OutputDebugString(L"BREAK\n");
-                Sleep(500);
-            }
-            __debugbreak();
-    }*/
 }
 
 
@@ -545,6 +597,11 @@ _FX void Dll_InitExeEntry(void)
     //
     // once we return here the process images entrypoint will be called
     //
+
+#ifdef WITH_DEBUG
+    DbgTrace("Dll_InitExeEntry completed");
+#endif
+    Dll_EntryComplete = TRUE;
 }
 
 
@@ -695,11 +752,10 @@ _FX void Dll_SelectImageType(void)
     // programs running as embedded previewers within Outlook
     //
 
-    Dll_RestrictedToken = Secure_IsRestrictedToken(FALSE);
-
-    if (Dll_RestrictedToken) {
+    if (Dll_RestrictedToken || Dll_AppContainerToken) {
 
         if (Dll_ImageType == DLL_IMAGE_GOOGLE_CHROME ||
+            Dll_ImageType == DLL_IMAGE_MOZILLA_FIREFOX ||
             Dll_ImageType == DLL_IMAGE_ACROBAT_READER ||
             Dll_ImageType == DLL_IMAGE_FLASH_PLAYER_SANDBOX) {
 
@@ -720,29 +776,24 @@ _FX ULONG_PTR Dll_Ordinal1(
     ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
     ULONG_PTR arg4, ULONG_PTR arg5)
 {
-    struct _INJECT_DATA {           // keep in sync with core/low/inject.c
-
-        ULONG64 sbielow_data;               // syscall_data_len & extra_data_offset;
-        ULONG64 RtlFindActCtx_SavedArg1;    // LdrLoadDll
-
-        ULONG64 LdrGetProcAddr;
-        ULONG64 NtRaiseHardError;
-        ULONG64 RtlFindActCtx;
-        ULONG   RtlFindActCtx_Protect;
-        
-        UCHAR   Reserved[188];              // the rest of _INJECT_DATA
-
-    } *inject; // total size 232
-
     typedef ULONG_PTR (*P_RtlFindActivationContextSectionString)(
                     ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
                     ULONG_PTR arg4, ULONG_PTR arg5);
     P_RtlFindActivationContextSectionString RtlFindActCtx;
 
+#if defined(_M_ARM64) || defined(_M_ARM64EC)
+    //
+    // on ARM64 we hook LdrLoadDll instead, using the prototype for 
+    // RtlFindActCtx is fine though as arguments 1-8 are passed in registers
+    // so if we set x4 or not does not matter in the least
+    //
+#endif
+
+    INJECT_DATA *inject;
     SBIELOW_DATA *data;
     ULONG dummy_prot;
     BOOLEAN bHostInject = FALSE;
-
+        
     extern HANDLE SbieApi_DeviceHandle;
 
     //
@@ -750,24 +801,33 @@ _FX ULONG_PTR Dll_Ordinal1(
     // hook in core/low/entry.asm, with a parameter that points to the
     // syscall/inject data area.  the first ULONG64 in this data area
     // includes a pointer to the SbieLow data area
-    //
+    // 
 
     inject = (struct _INJECT_DATA *)arg1;
 
     data = (SBIELOW_DATA *)inject->sbielow_data;
 
     SbieApi_data = data;
-
-    VirtualProtect((void *)(ULONG_PTR)data, sizeof(SBIELOW_DATA),
-                   PAGE_EXECUTE_READ, &dummy_prot);
-
-    bHostInject = data->flags.bHostInject == 1;
+#ifdef _M_ARM64EC
+    SbieApi_SyscallPtr = (ULONG*)((ULONG64)data->syscall_data + sizeof(ULONG) + sizeof(ULONG) + (NATIVE_FUNCTION_SIZE * NATIVE_FUNCTION_COUNT));
+#endif
 
     //
     // the SbieLow data area includes values that are useful to us
+    // so we copy them into dedicated variables if we are going to use them more often
     //
 
+    bHostInject = data->flags.bHostInject == 1;
+
+#ifndef _WIN64
     Dll_IsWow64 = data->flags.is_wow64 == 1;
+#endif
+#ifdef _M_X64
+    Dll_IsArm64ec = data->flags.is_arm64ec == 1;
+#endif
+#ifndef _M_ARM64
+    Dll_IsXtAjit = data->flags.is_xtajit == 1;
+#endif
 
     SbieApi_DeviceHandle = (HANDLE)data->api_device_handle;
 
@@ -785,10 +845,13 @@ _FX ULONG_PTR Dll_Ordinal1(
                                                     inject->RtlFindActCtx;
 
     //
-    // free the syscall/inject data area which is no longer needed
+    // make sbielow_data read only, as it contsins required
+    // nt dll function copies it must stay executive
     //
 
-    VirtualFree(inject, 0, MEM_RELEASE);
+    VirtualProtect((void *)data, sizeof(SBIELOW_DATA),
+                   PAGE_EXECUTE_READ, &dummy_prot);
+
 
     if (!bHostInject)
     {
@@ -798,10 +861,10 @@ _FX ULONG_PTR Dll_Ordinal1(
         //
         HANDLE heventProcessStart = 0;
 
-        Dll_InitInjected(); // install required hooks
+        Dll_InitInjected(); // install required hooks (Dll_InitInjected -> Ldr_Init -> Ldr_Inject_Init(FALSE))
 
         //
-        // notify RPCSS that a new proces was created in the current sandbox
+        // notify RPCSS that a new process was created in the current sandbox
         //
 
         if (Dll_ImageType != DLL_IMAGE_SANDBOXIE_RPCSS) {
@@ -819,8 +882,10 @@ _FX ULONG_PTR Dll_Ordinal1(
         //
 
         int MustRestartProcess = 0;
-        if(Dll_ProcessFlags & SBIE_FLAG_PROCESS_IN_PCA_JOB)
-            MustRestartProcess = 1;
+        if (Dll_ProcessFlags & SBIE_FLAG_PROCESS_IN_PCA_JOB) {
+            if (!SbieApi_QueryConfBool(NULL, L"NoRestartOnPAC", FALSE))
+                MustRestartProcess = 1;
+        }
 
         else if (Dll_ProcessFlags & SBIE_FLAG_FORCED_PROCESS) {
             if (SbieApi_QueryConfBool(NULL, L"ForceRestartAll", FALSE)
@@ -832,18 +897,48 @@ _FX ULONG_PTR Dll_Ordinal1(
 
             WCHAR text[128];
             Sbie_snwprintf(text, 128, L"Cleanly restarting forced process, reason %d", MustRestartProcess);
-            SbieApi_MonitorPut(MONITOR_OTHER, text);
+            SbieApi_MonitorPutMsg(MONITOR_OTHER, text);
 
             extern void Proc_RestartProcessOutOfPcaJob(void);
             Proc_RestartProcessOutOfPcaJob();
             // does not return
         }
+
+        //
+        // explorer needs sandboxed COM show warning and terminate when COM is not sandboxies
+        //
+
+        if (Dll_ImageType == DLL_IMAGE_SHELL_EXPLORER && SbieDll_IsOpenCOM()) {
+
+            SbieApi_Log(2195, NULL);
+            ExitProcess(0);
+        }
+
+        //
+        // msi installer requires COM to be sandboxed, else the installation will be done outside the sandbox
+        //
+
+        if (Dll_ImageType == DLL_IMAGE_MSI_INSTALLER && SbieDll_IsOpenCOM()) {
+
+            SbieApi_Log(2196, NULL);
+            ExitProcess(0);
+        }
     }
     else
     {
-        Ldr_Inject_Init(bHostInject);
+        Ldr_Inject_Init(TRUE);
     }
 	
+    //
+    // free the syscall/inject data area which is no longer needed
+    //
+
+#ifdef _M_ARM64EC
+    SbieApi_SyscallPtr = NULL;
+#endif
+    VirtualFree(inject, 0, MEM_RELEASE);
+
+    
     //
     // conclude the detour by passing control back to the original
     // RtlFindActivationContextSectionString.  the detour code used
@@ -853,3 +948,72 @@ _FX ULONG_PTR Dll_Ordinal1(
 
     return RtlFindActCtx(arg1, arg2, arg3, arg4, arg5);
 }
+
+
+//---------------------------------------------------------------------------
+// Dll_Wow64DisableTurboThunks
+//---------------------------------------------------------------------------
+
+#ifndef _WIN64
+
+typedef enum _WOW64_FUNCTION {
+    Wow64Function64Nop,
+    Wow64FunctionQueryProcessDebugInfo,
+    Wow64FunctionTurboThunkControl,
+    Wow64FunctionCfgDispatchControl,
+    Wow64FunctionOptimizeChpeImportThunks,
+} WOW64_FUNCTION;
+
+typedef NTSTATUS(*P_NtWow64CallFunction64)(
+    _In_ WOW64_FUNCTION Wow64Function,
+    _In_ ULONG Flags,
+    _In_ ULONG InputBufferLength,
+    _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _Out_writes_bytes_opt_(OutputBufferLength) PVOID OutputBuffer,
+    _Out_opt_ PULONG ReturnLength
+);
+
+#define WOW64_TURBO_THUNK_DISABLE 0
+#define WOW64_TURBO_THUNK_ENABLE  1   // STATUS_NOT_SUPPORTED :(
+
+_FX void Dll_Wow64DisableTurboThunks(void)
+{
+    if (!Dll_IsWow64)
+        return;
+
+    //
+    // Dll_FixWow64Syscall (dllhooks.c):
+    // the Wow64 thunking layer for syscalls in ntdll32 has several thunks:
+    // thunk 0 calls the corresponding NtXxx export in the 64-bit ntdll.
+    // other thunks issue the syscall instruction directly and are probably
+    // intended as an optimization.  we want all 32-bit syscalls to go
+    // through our SbieLow syscall interface, so we need to always force
+    // use of thunk 0 rather than the optimization thunks.
+    //
+    // Windows 10: 
+    // Starting with windows 10 we can use Wow64FunctionTurboThunkControl
+    // to disable this "optimization" properly.
+    // 
+    // Windows on ARM64:
+    // On ARM64 there is no wow64cpu.dll and Wow64FunctionTurboThunkControl
+    // returns STATUS_NOT_IMPLEMENTED, and no use of Turbo Thunks has been 
+    // yet observed hence we can sattle on doing nothing for the time being.
+    //
+    
+    if (Dll_IsXtAjit)
+        return;
+
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+    P_NtWow64CallFunction64 NtWow64CallFunction64 = (P_NtWow64CallFunction64)GetProcAddress(Dll_Ntdll, "NtWow64CallFunction64");
+    if (NtWow64CallFunction64) {
+        ULONG ThunkInput = WOW64_TURBO_THUNK_DISABLE;
+        status = NtWow64CallFunction64(Wow64FunctionTurboThunkControl, 0, sizeof(ThunkInput), &ThunkInput, 0, NULL, NULL);
+    }
+
+    if(!NT_SUCCESS(status))
+        SbieApi_Log(2205, L"Wow64FunctionTurboThunkControl %08X", status);
+}
+
+#endif

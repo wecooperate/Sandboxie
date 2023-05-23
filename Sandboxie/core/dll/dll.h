@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -48,8 +48,9 @@ extern __declspec(dllexport) int __CRTDECL Sbie_snprintf(char *_Buffer, size_t C
 #define TRUE_NAME_BUFFER        0
 #define COPY_NAME_BUFFER        1
 #define TMPL_NAME_BUFFER        2
-#define NAME_BUFFER_COUNT       3
-#define NAME_BUFFER_DEPTH       24
+#define MISC_NAME_BUFFER        3 // 4, 5, 6, 7
+#define NAME_BUFFER_COUNT       8
+#define NAME_BUFFER_DEPTH       16 // 12
 
 
 #ifdef _WIN64
@@ -61,7 +62,7 @@ extern __declspec(dllexport) int __CRTDECL Sbie_snprintf(char *_Buffer, size_t C
 #ifdef _WIN64
 
 // Pointer to 64-bit PEB_LDR_DATA is at offset 0x0018 of 64-bit PEB
-#define GET_ADDR_OF_PEB __readgsqword(0x60)
+#define GET_ADDR_OF_PEB NtCurrentPeb()
 #define GET_PEB_LDR_DATA (*(PEB_LDR_DATA **)(GET_ADDR_OF_PEB + 0x18))
 #define GET_PEB_IMAGE_BASE (*(ULONG_PTR *)(GET_ADDR_OF_PEB + 0x10))
 #define GET_PEB_MAJOR_VERSION (*(USHORT *)(GET_ADDR_OF_PEB + 0x118))
@@ -152,6 +153,7 @@ typedef struct _MY_LDR_WORKER_QUEUE_STUFF {
 }MY_LDR_WORKER_QUEUE_STUFF;
 #endif
 */
+
 typedef struct _THREAD_DATA {
 
     //
@@ -160,7 +162,8 @@ typedef struct _THREAD_DATA {
 
     WCHAR *name_buffer[NAME_BUFFER_COUNT][NAME_BUFFER_DEPTH];
     ULONG name_buffer_len[NAME_BUFFER_COUNT][NAME_BUFFER_DEPTH];
-    int depth;
+    int name_buffer_count[NAME_BUFFER_DEPTH];
+    int name_buffer_depth;
 
     //
     // locks
@@ -248,6 +251,8 @@ extern HINSTANCE Dll_Instance;
 extern HMODULE Dll_Ntdll;
 extern HMODULE Dll_Kernel32;
 extern HMODULE Dll_KernelBase;
+extern HMODULE Dll_Win32u;
+// $Workaround$ - 3rd party fix
 extern HMODULE Dll_DigitalGuardian;
 
 extern const WCHAR *Dll_BoxName;
@@ -273,13 +278,24 @@ extern ULONG Dll_SessionId;
 
 extern ULONG64 Dll_ProcessFlags;
 
+#ifndef _WIN64
 extern BOOLEAN Dll_IsWow64;
+#endif
+#ifdef _M_X64
+extern BOOLEAN Dll_IsArm64ec;
+#endif
+#ifndef _M_ARM64
+extern BOOLEAN Dll_IsXtAjit;
+#endif
 extern BOOLEAN Dll_IsSystemSid;
 extern BOOLEAN Dll_InitComplete;
+extern BOOLEAN Dll_EntryComplete;
 extern BOOLEAN Dll_RestrictedToken;
+extern BOOLEAN Dll_AppContainerToken;
 extern BOOLEAN Dll_ChromeSandbox;
 extern BOOLEAN Dll_FirstProcessInBox;
 extern BOOLEAN Dll_CompartmentMode;
+//extern BOOLEAN Dll_AlernateIpcNaming;
 
 extern ULONG Dll_ImageType;
 
@@ -345,9 +361,20 @@ void Dll_FreeCode128(void *ptr);
 THREAD_DATA *Dll_GetTlsData(ULONG *pLastError);
 void Dll_FreeTlsData(void);
 
+//#define NAME_BUFFER_DEBUG
+#ifdef NAME_BUFFER_DEBUG
+WCHAR *Dll_GetTlsNameBuffer_(THREAD_DATA *data, ULONG which, ULONG size, char* func);
+void Dll_PushTlsNameBuffer_(THREAD_DATA *data, char* func);
+void Dll_PopTlsNameBuffer_(THREAD_DATA *data, char* func);
+#define Dll_GetTlsNameBuffer(x,y,z) Dll_GetTlsNameBuffer_(x, y, z, __FUNCTION__)
+#define Dll_PushTlsNameBuffer(x) Dll_PushTlsNameBuffer_(x, __FUNCTION__)
+#define Dll_PopTlsNameBuffer(x) Dll_PopTlsNameBuffer_(x, __FUNCTION__)
+#else
 WCHAR *Dll_GetTlsNameBuffer(THREAD_DATA *data, ULONG which, ULONG size);
 void Dll_PushTlsNameBuffer(THREAD_DATA *data);
 void Dll_PopTlsNameBuffer(THREAD_DATA *data);
+#endif
+
 
 
 //---------------------------------------------------------------------------
@@ -409,7 +436,9 @@ BOOLEAN Dll_SkipHook(const WCHAR *HookName);
 
 void *Dll_JumpStub(void *OldCode, void *NewCode, ULONG_PTR StubArg);
 
+#if !defined(_M_ARM64EC)
 ULONG_PTR *Dll_JumpStubData(void);
+#endif
 
 ULONG_PTR *Dll_JumpStubDataForCode(void *StubCode);
 
@@ -444,7 +473,7 @@ NTSTATUS Pipe_NtCreateFile(
     void *EaBuffer,
     ULONG EaLength);
 
-void File_DuplicateRecover(HANDLE OldFileHandle, HANDLE NewFileHandle);
+void Handle_SetupDuplicate(HANDLE OldFileHandle, HANDLE NewFileHandle);
 
 void File_DoAutoRecover(BOOLEAN force);
 
@@ -477,9 +506,7 @@ BOOLEAN File_IsBlockedNetParam(const WCHAR *BoxName);
 
 void File_GetSetDeviceMap(WCHAR *DeviceMap96);
 
-typedef void(*P_CloseHandler)(HANDLE handle);
-BOOLEAN File_RegisterCloseHandler(HANDLE FileHandle, P_CloseHandler CloseHandler);
-BOOLEAN File_UnRegisterCloseHandler(HANDLE FileHandle, P_CloseHandler CloseHandler);
+void File_NotifyRecover(HANDLE FileHandle);
 
 //---------------------------------------------------------------------------
 // Functions (key)
@@ -507,7 +534,7 @@ void Key_DeleteValueFromCLSID(
     const WCHAR *Xxxid, const WCHAR *Guid, const WCHAR *ValueName);
 
 void Key_CreateBaseKeys();
-//void Key_CreateBaseFolders();
+void File_CreateBaseFolders();
 
 //---------------------------------------------------------------------------
 // Functions (sxs)
@@ -556,7 +583,7 @@ void Gui_AllowSetForegroundWindow(void);
 
 void Gdi_SplWow64(BOOLEAN Register);
 
-BOOLEAN Gdi_InitZero(void);
+BOOLEAN Gdi_InitZero(HMODULE module);
 
 void Gui_ResetClipCursor(void);
 
@@ -599,6 +626,8 @@ void Secure_InitSecurityDescriptors(void);
 
 BOOLEAN Secure_IsRestrictedToken(BOOLEAN CheckThreadToken);
 
+BOOLEAN Secure_IsAppContainerToken(HANDLE hToken);
+
 BOOLEAN Secure_IsLocalSystemToken(BOOLEAN CheckThreadToken);
 
 BOOL Proc_ImpersonateSelf(BOOLEAN Enable);
@@ -612,7 +641,7 @@ BOOLEAN Win32_Init(HMODULE hmodule);
 // Functions (init for DllMain)
 //---------------------------------------------------------------------------
 
-BOOLEAN File_InitHandles(void);
+BOOLEAN Handle_Init(void);
 
 BOOLEAN Key_Init(void);
 
@@ -789,7 +818,7 @@ BOOLEAN Config_MatchImage(
 
 WCHAR* Config_MatchImageAndGetValue(WCHAR* value, const WCHAR* ImageName, ULONG* pMode);
 
-BOOLEAN Config_InitPatternList(const WCHAR* boxname, const WCHAR* setting, LIST* list);
+BOOLEAN Config_InitPatternList(const WCHAR* boxname, const WCHAR* setting, LIST* list, BOOLEAN dos);
 
 VOID Config_FreePatternList(LIST* list);
 

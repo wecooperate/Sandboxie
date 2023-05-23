@@ -307,6 +307,14 @@ NtCreateDirectoryObject(
 );
 
 __declspec(dllimport) NTSTATUS __stdcall
+NtCreateDirectoryObjectEx(
+    OUT PHANDLE DirectoryHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    IN HANDLE ShadowDirectoryHandle,
+    IN ULONG Flags);
+
+__declspec(dllimport) NTSTATUS __stdcall
 NtOpenDirectoryObject(
     OUT PHANDLE             DirectoryHandle,
     IN ACCESS_MASK          DesiredAccess,
@@ -874,6 +882,14 @@ typedef enum _FSINFOCLASS {
     FileFsMaximumInformation
 } FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
 
+typedef struct _FILE_FS_VOLUME_INFORMATION {
+  LARGE_INTEGER VolumeCreationTime;
+  ULONG         VolumeSerialNumber;
+  ULONG         VolumeLabelLength;
+  BOOLEAN       SupportsObjects;
+  WCHAR         VolumeLabel[1];
+} FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
+
 __declspec(dllimport) NTSTATUS __stdcall
 NtQueryVolumeInformationFile(
     IN  HANDLE FileHandle,
@@ -1092,6 +1108,8 @@ typedef enum _KEY_INFORMATION_CLASS {
     KeyFlagsInformation,
     KeyVirtualizationInformation,   // Windows Vista
     KeyHandleTagsInformation,       // Windows 7
+    KeyTrustInformation,
+    KeyLayerInformation,
     MaxKeyInfoClass
 } KEY_INFORMATION_CLASS;
 
@@ -1986,6 +2004,11 @@ __declspec(dllimport) NTSTATUS __stdcall NtLoadKey(
     POBJECT_ATTRIBUTES TargetObjectAttributes,
     POBJECT_ATTRIBUTES SourceObjectAttributes);
 
+__declspec(dllimport) NTSTATUS __stdcall NtLoadKey2(
+    POBJECT_ATTRIBUTES TargetObjectAttributes,
+    POBJECT_ATTRIBUTES SourceObjectAttributes,
+    ULONG Flags);
+
 __declspec(dllimport) NTSTATUS __stdcall NtSaveKey(
     HANDLE KeyHandle,
     HANDLE FileHandle);
@@ -2108,6 +2131,17 @@ __declspec(dllimport) NTSTATUS __stdcall NtMapViewOfSection(
     IN  ULONG InheritDisposition,
     IN  ULONG AllocationType,
     IN  ULONG Protect);
+
+__declspec(dllimport) NTSTATUS __stdcall NtNotifyChangeDirectoryFile(
+    IN  HANDLE FileHandle,
+    IN  HANDLE Event OPTIONAL,
+    IN  PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN  PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID Buffer,
+    IN  ULONG BufferSize,
+    IN  ULONG CompletionFilter,
+    IN  BOOLEAN WatchTree);
 
 __declspec(dllimport) NTSTATUS __stdcall NtUnmapViewOfSection(
     IN  HANDLE ProcessHandle,
@@ -2268,8 +2302,8 @@ __declspec(dllimport) NTSTATUS RtlGetGroupSecurityDescriptor(
     PSID* Group, PBOOLEAN GroupDefaulted
 );
 
-__declspec(dllimport) BOOLEAN RtlEqualSid(PSID Sid1, PSID Sid2);
-__declspec(dllimport) PVOID RtlFreeSid(PSID Sid);
+__declspec(dllimport) BOOLEAN NTAPI RtlEqualSid(PSID Sid1, PSID Sid2);
+__declspec(dllimport) PVOID NTAPI RtlFreeSid(PSID Sid);
 
 //---------------------------------------------------------------------------
 
@@ -2283,26 +2317,31 @@ typedef struct _RTL_DRIVE_LETTER_CURDIR {
 typedef struct _RTL_USER_PROCESS_PARAMETERS {
     ULONG MaximumLength;
     ULONG Length;
+
     ULONG Flags;
     ULONG DebugFlags;
+
     PVOID ConsoleHandle;
     ULONG ConsoleFlags;
     HANDLE StdInputHandle;
     HANDLE StdOutputHandle;
     HANDLE StdErrorHandle;
+
     UNICODE_STRING CurrentDirectoryPath;
     HANDLE CurrentDirectoryHandle;
     UNICODE_STRING DllPath;
     UNICODE_STRING ImagePathName;
     UNICODE_STRING CommandLine;
     PVOID Environment;
+
     ULONG StartingPositionLeft;
     ULONG StartingPositionTop;
     ULONG Width;
     ULONG Height;
     ULONG CharWidth;
     ULONG CharHeight;
-    ULONG ConsoleTextAttributes;
+    ULONG FillAttribute; // ConsoleTextAttributes; ???
+
     ULONG WindowFlags;
     ULONG ShowWindowFlags;
     UNICODE_STRING WindowTitle;
@@ -2310,6 +2349,17 @@ typedef struct _RTL_USER_PROCESS_PARAMETERS {
     UNICODE_STRING ShellInfo;
     UNICODE_STRING RuntimeData;
     RTL_DRIVE_LETTER_CURDIR DLCurrentDirectory[0x20];
+
+    ULONG_PTR EnvironmentSize;
+    ULONG_PTR EnvironmentVersion;
+    PVOID PackageDependencyData;
+    ULONG ProcessGroupId;
+    ULONG LoaderThreads;
+
+    UNICODE_STRING RedirectionDllName; // REDSTONE4
+    UNICODE_STRING HeapPartitionName; // 19H1
+    ULONG_PTR DefaultThreadpoolCpuSetMasks;
+    ULONG DefaultThreadpoolCpuSetMaskCount;
 } RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
 
 __declspec(dllimport) NTSTATUS RtlCreateProcessParameters(
@@ -2577,9 +2627,11 @@ __declspec(dllimport) NTSTATUS __stdcall NtRaiseHardError(
 
 //---------------------------------------------------------------------------
 
-#ifdef _WIN64
+#ifdef _M_ARM64
+#define NtCurrentPeb() (*((ULONG_PTR*)(__getReg(18) + 0x60)))
+#elif _WIN64
 #define NtCurrentPeb() ((ULONG_PTR)__readgsqword(0x60))
-#else ! _WIN64
+#else // _M_X86
 #define NtCurrentPeb() ((ULONG_PTR)__readfsdword(0x30))
 #endif _WIN64
 

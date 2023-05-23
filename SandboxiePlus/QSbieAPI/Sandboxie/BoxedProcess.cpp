@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2020, David Xanatos
+ * Copyright (c) 2020-2022, David Xanatos
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -43,7 +43,7 @@ CBoxedProcess::CBoxedProcess(quint32 ProcessId, class CSandBox* pBox)
 	m_ProcessId = ProcessId;
 
 	m_ParendPID = 0;
-	m_SessionId = 0;
+	m_SessionId = -1;
 
 	m_ProcessFlags = 0;
 	m_ImageType = -1;
@@ -59,6 +59,7 @@ CBoxedProcess::~CBoxedProcess()
 	//delete m;
 }
 
+
 typedef enum _PEB_OFFSET
 {
 	PhpoCurrentDirectory,
@@ -73,6 +74,7 @@ typedef enum _PEB_OFFSET
 	PhpoWow64 = 0x10000
 } PEB_OFFSET;
 
+
 typedef struct _STRING32
 {
 	USHORT Length;
@@ -80,21 +82,56 @@ typedef struct _STRING32
 	ULONG Buffer;
 } UNICODE_STRING32, * PUNICODE_STRING32;
 
+//typedef struct _STRING64 {
+//  USHORT Length;
+//  USHORT MaximumLength;
+//  PVOID64 Buffer;
+//} UNICODE_STRING64, * PUNICODE_STRING64;
+
+
+//// PROCESS_BASIC_INFORMATION for pure 32 and 64-bit processes
+//typedef struct _PROCESS_BASIC_INFORMATION {
+//    PVOID Reserved1;
+//    PVOID PebBaseAddress;
+//    PVOID Reserved2[2];
+//    ULONG_PTR UniqueProcessId;
+//    PVOID Reserved3;
+//} PROCESS_BASIC_INFORMATION;
+
+// PROCESS_BASIC_INFORMATION for 32-bit process on WOW64
+typedef struct _PROCESS_BASIC_INFORMATION_WOW64 {
+    PVOID Reserved1[2];
+    PVOID64 PebBaseAddress;
+    PVOID Reserved2[4];
+    ULONG_PTR UniqueProcessId[2];
+    PVOID Reserved3[2];
+} PROCESS_BASIC_INFORMATION_WOW64;
+
+
+typedef NTSTATUS (NTAPI *_NtQueryInformationProcess)(IN HANDLE ProcessHandle, ULONG ProcessInformationClass,
+    OUT PVOID ProcessInformation, IN ULONG ProcessInformationLength, OUT PULONG ReturnLength OPTIONAL );
+
+//typedef NTSTATUS (NTAPI *_NtReadVirtualMemory)(IN HANDLE ProcessHandle, IN PVOID BaseAddress,
+//    OUT PVOID Buffer, IN SIZE_T Size, OUT PSIZE_T NumberOfBytesRead);
+
+typedef NTSTATUS (NTAPI *_NtWow64ReadVirtualMemory64)(IN HANDLE ProcessHandle,IN PVOID64 BaseAddress,
+    OUT PVOID Buffer, IN ULONG64 Size, OUT PULONG64 NumberOfBytesRead);
+
+
 QString CBoxedProcess__GetPebString(HANDLE ProcessHandle, PEB_OFFSET Offset)
 {
-	BOOL is64BitOperatingSystem = FALSE;
+	BOOL is64BitOperatingSystem;
 	BOOL isWow64Process = FALSE;
 #ifdef _WIN64
 	is64BitOperatingSystem = TRUE;
 #else // ! _WIN64
-	IsWow64Process(GetCurrentProcess(), &isWow64Process);
+	isWow64Process = CSbieAPI::IsWow64();
 	is64BitOperatingSystem = isWow64Process;
 #endif _WIN64
 
 	BOOL isTargetWow64Process = FALSE;
 	IsWow64Process(ProcessHandle, &isTargetWow64Process);
 	BOOL isTarget64BitProcess = is64BitOperatingSystem && !isTargetWow64Process;
-
 
 	ULONG processParametersOffset = isTarget64BitProcess ? 0x20 : 0x10;
 
@@ -107,7 +144,7 @@ QString CBoxedProcess__GetPebString(HANDLE ProcessHandle, PEB_OFFSET Offset)
 		return QString();
 	}
 
-	wstring s;
+	std::wstring s;
 	if (isTargetWow64Process) // OS : 64Bit, Cur : 32 or 64, Tar: 32bit
 	{
 		PVOID peb32;
@@ -131,7 +168,27 @@ QString CBoxedProcess__GetPebString(HANDLE ProcessHandle, PEB_OFFSET Offset)
 	}
 	else if (isWow64Process) //Os : 64Bit, Cur 32, Tar 64
 	{
-		return QString(); // not supported
+		static _NtQueryInformationProcess query = (_NtQueryInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtWow64QueryInformationProcess64");
+		static _NtWow64ReadVirtualMemory64 read = (_NtWow64ReadVirtualMemory64)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtWow64ReadVirtualMemory64");
+
+        PROCESS_BASIC_INFORMATION_WOW64 pbi;
+		if (!NT_SUCCESS(query(ProcessHandle, ProcessBasicInformation, &pbi, sizeof(PROCESS_BASIC_INFORMATION_WOW64), NULL))) 
+			return QString();
+        
+		ULONGLONG procParams;
+		if (!NT_SUCCESS(read(ProcessHandle, (PVOID64)((ULONGLONG)pbi.PebBaseAddress + processParametersOffset), &procParams, sizeof(ULONGLONG), NULL)))
+			return QString();
+
+		UNICODE_STRING64 us;
+		if (!NT_SUCCESS(read(ProcessHandle, (PVOID64)(procParams + offset), &us, sizeof(UNICODE_STRING64), NULL)))
+			return QString();
+
+		if ((us.Buffer == 0) || (us.Length == 0))
+			return QString();
+		
+		s.resize(us.Length / 2);
+		if (!NT_SUCCESS(read(ProcessHandle, (PVOID64)us.Buffer, (PVOID64)s.c_str(), s.length() * 2, NULL)))
+			return QString();
 	}
 	else // Os,Cur,Tar : 64 or 32
 	{
@@ -160,37 +217,38 @@ QString CBoxedProcess__GetPebString(HANDLE ProcessHandle, PEB_OFFSET Offset)
 
 bool CBoxedProcess::InitProcessInfo()
 {
-	HANDLE ProcessHandle;
-	ProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, (DWORD)m_ProcessId);
-	if (ProcessHandle == INVALID_HANDLE_VALUE) // try with less rights
+	HANDLE ProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, (DWORD)m_ProcessId);
+	if (ProcessHandle == NULL) // try with less rights
 		ProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (DWORD)m_ProcessId);
-	if (ProcessHandle == INVALID_HANDLE_VALUE)
+	if (ProcessHandle == NULL) // try with even less rights
+		ProcessHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)m_ProcessId);
+	if (ProcessHandle == NULL)
 		return false;
 
+	InitProcessInfoImpl(ProcessHandle);
+
+	NtClose(ProcessHandle);
+	return true;
+}
+
+void CBoxedProcess::InitProcessInfoImpl(void* ProcessHandle)
+{
 	PROCESS_BASIC_INFORMATION BasicInformation;
 	NTSTATUS status = NtQueryInformationProcess(ProcessHandle, ProcessBasicInformation, &BasicInformation, sizeof(PROCESS_BASIC_INFORMATION), NULL);
 	if (NT_SUCCESS(status)) {
 		m_ParendPID = (quint32)BasicInformation.InheritedFromUniqueProcessId;
 	}
-
-	int iMaxRetry = 10;
-retry:
+	
 	TCHAR filename[MAX_PATH];
-	if (DWORD size = GetModuleFileNameEx(ProcessHandle, NULL, filename, MAX_PATH))
+	DWORD dwSize = MAX_PATH;
+	if(QueryFullProcessImageNameW(ProcessHandle, 0, filename, &dwSize))
 		m_ImagePath = QString::fromWCharArray(filename);
-	else if (iMaxRetry-- > 0) {
-		// on win 7 this sometimes fails with invalid handle despite the handle being valid, 
-		// just wait a second and retry, this happend when comming from OnProcessBoxed
-		QThread::msleep(50);
-		goto retry;
-	}
-
 
 	BOOL isTargetWow64Process = FALSE;
 	IsWow64Process(ProcessHandle, &isTargetWow64Process);
 	m_bIsWoW64 = isTargetWow64Process;
 
-	if (1) // windows 8.1 and later // todo add os version check
+	if (m_CommandLine.isEmpty()) // windows 8.1 and later
 	{
 #define ProcessCommandLineInformation ((PROCESSINFOCLASS)60)
 		ULONG returnLength = 0;
@@ -206,32 +264,27 @@ retry:
 #undef ProcessCommandLineInformation
 	}
 
-	if (m_CommandLine.isEmpty()) // fall back to teh win 7 method - requirers PROCESS_VM_READ
+	if (m_CommandLine.isEmpty()) // fall back to the win 7 method - requirers PROCESS_VM_READ
 	{
 		m_CommandLine = CBoxedProcess__GetPebString(ProcessHandle, PhpoCommandLine);
 	}
-
-	NtClose(ProcessHandle);
-
-	return true;
 }
 
 bool CBoxedProcess::InitProcessInfoEx()
 {
-	if (m_ProcessFlags == 0 && m_pBox) {
+	if (m_ProcessFlags == 0 && m_pBox)
 		m_ProcessFlags = m_pBox->Api()->QueryProcessInfo(m_ProcessId);
 		m_ImageType = m_pBox->Api()->QueryProcessInfo(m_ProcessId, 'gpit');
-	}
 
 	return true;
 }
 
-extern "C"
-{
-	NTSYSCALLAPI NTSTATUS NTAPI NtTerminateProcess(_In_opt_ HANDLE ProcessHandle, _In_ NTSTATUS ExitStatus);
-	NTSYSCALLAPI NTSTATUS NTAPI NtSuspendProcess(_In_ HANDLE ProcessHandle);
-	NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(_In_ HANDLE ProcessHandle);
-}
+//extern "C"
+//{
+//	NTSYSCALLAPI NTSTATUS NTAPI NtTerminateProcess(_In_opt_ HANDLE ProcessHandle, _In_ NTSTATUS ExitStatus);
+//	NTSYSCALLAPI NTSTATUS NTAPI NtSuspendProcess(_In_ HANDLE ProcessHandle);
+//	NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(_In_ HANDLE ProcessHandle);
+//}
 
 #include <TlHelp32.h>
 
@@ -281,7 +334,7 @@ bool CBoxedProcess::IsSuspended() const
 {
 	bool isSuspended = true;
 
-	// todo: do that globaly once per sec for all boxed processes
+	// todo: do that globally once per sec for all boxed processes
 
 	// Note: If the specified process is a 64-bit process and the caller is a 32-bit process, this function fails and the last error code is ERROR_PARTIAL_COPY (299).
 	HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);

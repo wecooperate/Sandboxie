@@ -31,6 +31,12 @@
 #include <stdio.h>
 #include <psapi.h>
 
+#if defined(_M_ARM64) || defined(_M_ARM64EC)
+void* Hook_GetFFSTarget(void* ptr);
+void* Hook_GetXipTarget(void* ptr, int mode);
+void* SbieDll_Hook_arm(const char* SourceFuncName, void* SourceFunc, void* DetourFunc, HMODULE module);
+#endif
+
 //---------------------------------------------------------------------------
 // Variables
 //---------------------------------------------------------------------------
@@ -213,9 +219,9 @@ BOOLEAN Gui_UseProxyService = TRUE;
 //---------------------------------------------------------------------------
 
 
-static BOOLEAN Gui_Init2(void);
+static BOOLEAN Gui_Init2(HMODULE module);
 
-static BOOLEAN Gui_Init3(void);
+static BOOLEAN Gui_Init3(HMODULE module);
 
 static BOOL Gui_SetThreadDesktop(HDESK hDesktop);
 
@@ -360,14 +366,14 @@ _FX BOOLEAN Gui_Init(HMODULE module)
 
     const UCHAR *ProcName;
 
-    if (! Gdi_InitZero())       // only if Gdi_Init was not called yet
+    if (! Gdi_InitZero(module))       // only if Gdi_Init was not called yet
         return FALSE;
 
     // NoSbieDesk BEGIN
 
     //
-    // Sandboxie is routing many gui related things through teh service, 
-    // when we operate in app mode we dont need to do that hence
+    // Sandboxie is routing many gui related things through the service, 
+    // when we operate in app mode we don't need to do that hence
     // disable the use of the gui proxy
     //
 
@@ -530,33 +536,33 @@ import_fail:
     ok = TRUE;
 
     if (ok)
-        ok = Gui_InitClass();
+        ok = Gui_InitClass(module);
 
     if (ok)
-        ok = Gui_InitTitle();
+        ok = Gui_InitTitle(module);
 
     if (ok)
-        ok = Gui_Init2();
+        ok = Gui_Init2(module);
 
     if (ok)
-        ok = Gui_InitEnum();
+        ok = Gui_InitEnum(module);
 
     if (ok)
-        ok = Gui_InitProp();
+        ok = Gui_InitProp(module);
 
     if (ok)
-        ok = Gui_InitMsg();
+        ok = Gui_InitMsg(module);
 
     if (ok)
-        ok = Gui_InitDlgTmpl();
+        ok = Gui_InitDlgTmpl(module);
 
     if (ok)
-        ok = Gui_Init3();
+        ok = Gui_Init3(module);
 
     if (Gui_UseProxyService) {
 
         if (ok)
-            ok = Gui_InitWinHooks();
+            ok = Gui_InitWinHooks(module);
 
         SBIEDLL_HOOK_GUI(AttachThreadInput);
     }
@@ -570,7 +576,7 @@ import_fail:
 //---------------------------------------------------------------------------
 
 
-_FX BOOLEAN Gui_Init2(void)
+_FX BOOLEAN Gui_Init2(HMODULE module)
 {
     SBIEDLL_HOOK_GUI(ExitWindowsEx);
     SBIEDLL_HOOK_GUI(EndTask);
@@ -633,10 +639,10 @@ _FX BOOLEAN Gui_Init2(void)
         SBIEDLL_HOOK_GUI(ActivateKeyboardLayout);
     }
 
-    if (! Gui_InitMisc())
+    if (! Gui_InitMisc(module))
         return FALSE;
 
-    if (! Gui_DDE_Init())
+    if (! Gui_DDE_Init(module))
         return FALSE;
 
     return TRUE;
@@ -648,7 +654,7 @@ _FX BOOLEAN Gui_Init2(void)
 //---------------------------------------------------------------------------
 
 
-_FX BOOLEAN Gui_Init3(void)
+_FX BOOLEAN Gui_Init3(HMODULE module)
 {
     //
     // expect that both RegisterDeviceNotificationA and
@@ -679,6 +685,7 @@ _FX BOOLEAN Gui_Init3(void)
 
 _FX void Gui_InitWindows7(void)
 {
+    // $HookHack$ - Custom, not automated, Hook
     if (Dll_KernelBase) {
 
         //
@@ -720,11 +727,47 @@ _FX void Gui_InitWindows7(void)
             SourceFunc = (UCHAR *)(*pSourceFunc);
             if (! SourceFunc)
                 continue;
-
+            
             //
             // confirm the function starts with an indirect jmp,
             // and try to replace the value at [x]
             //
+
+#ifdef _M_ARM64EC
+
+            //  48 8B FF            mov         rdi,rdi  
+            //  55                  push        rbp  
+            //  48 8B EC            mov         rbp,rsp  
+            //  5D                  pop         rbp  
+            //  90                  nop  
+            //  E9 02 48 18 00      jmp         #__GSHandlerCheck_SEH_AMD64+138h (07FFB572B8190h) 
+           
+            //  B0FFFEF0            adrp        xip0,#NtdllScrollBarWndProc_A (07FFD30995000h)  
+            //  91018210            add         xip0,xip0,#0x60  
+            //  D61F0200            br          xip0  
+
+            //  F0001050            adrp        xip0,NtUserPfn (07FFD30BA0000h)  
+            //  F9426A10            ldr         xip0,[xip0,#0x4D0]  // DefWindowProcA/DefWindowProcW
+            //  D61F0200            br          xip0  
+
+            UCHAR* Target = Hook_GetFFSTarget(SourceFunc);
+            if(Target) {
+
+                Target = Hook_GetXipTarget(Target, 1); // adrp add br
+                Target = Hook_GetXipTarget(Target, 0); // adrp ldr br
+                
+                *pSourceFunc = (ULONG_PTR)SbieDll_Hook_arm(
+                    FuncName, Target, DetourFunc, NULL);
+            }
+            else // fall back to SbieDll_Hook
+#else
+
+#ifdef _M_ARM64
+            void* ptr = Hook_GetXipTarget(SourceFunc, 1); // adrp add br
+            ptr = Hook_GetXipTarget(ptr, 0); // adrp ldr br
+            if (ptr != SourceFunc)
+                *pSourceFunc = (ULONG_PTR)ptr;
+#else
 
 #ifdef _WIN64
 
@@ -753,8 +796,10 @@ _FX void Gui_InitWindows7(void)
                 *pSourceFunc = *(ULONG_PTR *)target;
             }
 
+#endif
+#endif
             *pSourceFunc = (ULONG_PTR)SbieDll_Hook(
-                FuncName, (void *)(*pSourceFunc), DetourFunc);
+                FuncName, (void *)(*pSourceFunc), DetourFunc, NULL);
         }
     }
 }
@@ -1122,7 +1167,7 @@ _FX BOOLEAN Gui_IsSameBox(
 {
     ULONG idProcess, idThread;
     NTSTATUS status;
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
     ULONG session_id;
 
     idProcess = 0;
@@ -2645,11 +2690,11 @@ _FX NTSTATUS ComDlg32_GetOpenFileNameW(LPVOID lpofn)
     return bRet;
 }
 
-_FX BOOLEAN ComDlg32_Init(HMODULE hModule)
+_FX BOOLEAN ComDlg32_Init(HMODULE module)
 {
     //if (_wcsicmp(Dll_ImageName, L"opera.exe") == 0)
     //{
-        void *GetOpenFileNameW = GetProcAddress(hModule, "GetOpenFileNameW");
+        void *GetOpenFileNameW = GetProcAddress(module, "GetOpenFileNameW");
         SBIEDLL_HOOK(ComDlg32_, GetOpenFileNameW);
     //}
 

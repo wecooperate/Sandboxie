@@ -66,16 +66,21 @@ PROCESS_DATA *my_findProcessData(WCHAR *name,int createNew);
 // Functions (DllMain)
 //---------------------------------------------------------------------------
 
+SBIEDLL_EXPORT  void SbieDll_HookInit();
 
 SBIEDLL_EXPORT  void *SbieDll_Hook(
-    const char *SourceFuncName, void *SourceFunc, void *DetourFunc);
+    const char *SourceFuncName, void *SourceFunc, void *DetourFunc, HMODULE module);
 
 #define SBIEDLL_HOOK(pfx,proc)                  \
     *(ULONG_PTR *)&__sys_##proc = (ULONG_PTR)   \
-        SbieDll_Hook(#proc, proc, pfx##proc);   \
+        SbieDll_Hook(#proc, proc, pfx##proc, module);   \
     if (! __sys_##proc) return FALSE;
 
+SBIEDLL_EXPORT  void SbieDll_UnHookModule(HMODULE module);
+
 SBIEDLL_EXPORT  void SbieDll_DeviceChange(WPARAM wParam, LPARAM lParam);
+
+SBIEDLL_EXPORT  BOOL SbieDll_QueryFileAttributes(const WCHAR *NtPath, ULONG64 *size, ULONG64 *date, ULONG *attrs);
 
 SBIEDLL_EXPORT  const WCHAR *SbieDll_GetDrivePath(ULONG DriveIndex);
 
@@ -184,6 +189,8 @@ SBIEDLL_EXPORT  BOOL SbieDll_StartBoxedService(
 
 SBIEDLL_EXPORT  BOOL SbieDll_CheckProcessLocalSystem(HANDLE ProcessHandle);
 
+SBIEDLL_EXPORT  VOID SbieDll_SetFakeAdmin(BOOLEAN FakeAdmin);
+
 SBIEDLL_EXPORT  HANDLE SbieDll_OpenProcess(ACCESS_MASK DesiredAccess, HANDLE idProcess);
 
 SBIEDLL_EXPORT  HRESULT SbieDll_ComCreateProxy(
@@ -198,6 +205,8 @@ SBIEDLL_EXPORT  BOOLEAN SbieDll_IsOpenClsid(
 SBIEDLL_EXPORT  void SbieDll_DisableElevationHook(void);
 
 SBIEDLL_EXPORT  BOOLEAN SbieDll_RegisterDllCallback(void *Callback);
+
+SBIEDLL_EXPORT  BOOLEAN SbieDll_IsDllSkipHook(const WCHAR* ImageName);
 
 SBIEDLL_EXPORT  BOOLEAN SbieDll_ExpandAndRunProgram(const WCHAR *Command);
 
@@ -223,6 +232,11 @@ SBIEDLL_EXPORT  BOOLEAN SbieDll_GetSettingsForName_bool(
 SBIEDLL_EXPORT  BOOLEAN SbieDll_GetBorderColor(const WCHAR* box_name, COLORREF* color, BOOL* title, int* width);
 
 SBIEDLL_EXPORT  BOOLEAN SbieDll_IsReservedFileName(const WCHAR* name);
+
+SBIEDLL_EXPORT  void DbgPrint(const char* format, ...);
+SBIEDLL_EXPORT  void DbgTrace(const char* format, ...);
+
+SBIEDLL_EXPORT  BOOLEAN SbieDll_DisableCHPE(void);
 
 //---------------------------------------------------------------------------
 

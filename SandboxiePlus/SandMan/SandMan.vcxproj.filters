@@ -46,6 +46,9 @@
       <Extensions>ts</Extensions>
       <ParseFiles>false</ParseFiles>
     </Filter>
+    <Filter Include="Wizards">
+      <UniqueIdentifier>{4bf40c7e-2ce4-4528-813c-3b48b8c56155}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -135,8 +138,56 @@
     <ClCompile Include="Windows\OptionsTemplates.cpp">
       <Filter>Windows</Filter>
     </ClCompile>
-    <ClCompile Include="Windows\FileBrowserWindow.cpp">
+    <ClCompile Include="BoxJob.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="SbieProcess.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="Models\MonitorModel.cpp">
+      <Filter>Models</Filter>
+    </ClCompile>
+    <ClCompile Include="Wizards\SetupWizard.cpp">
+      <Filter>Wizards</Filter>
+    </ClCompile>
+    <ClCompile Include="Helpers\ReadDirectoryChanges.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="Helpers\ReadDirectoryChangesPrivate.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="BoxMonitor.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="SbieFindWnd.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="Windows\SupportDialog.cpp">
       <Filter>Windows</Filter>
+    </ClCompile>
+    <ClCompile Include="SandManRecovery.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="SandManTray.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="Views\FileView.cpp">
+      <Filter>Views</Filter>
+    </ClCompile>
+    <ClCompile Include="OnlineUpdater.cpp">
+      <Filter>SandMan</Filter>
+    </ClCompile>
+    <ClCompile Include="Helpers\FullScreen.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="Helpers\WinHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="Wizards\NewBoxWizard.cpp">
+      <Filter>Wizards</Filter>
+    </ClCompile>
+    <ClCompile Include="Wizards\TemplateWizard.cpp">
+      <Filter>Wizards</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -151,6 +202,24 @@
     </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Resource Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\version.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\ReadDirectoryChanges.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\ReadDirectoryChangesPrivate.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\ThreadSafeQueue.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\FullScreen.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Helpers\WinHelper.h">
+      <Filter>Helpers</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -196,8 +265,35 @@
     <QtMoc Include="Windows\SelectBoxWindow.h">
       <Filter>Windows</Filter>
     </QtMoc>
-    <QtMoc Include="Windows\FileBrowserWindow.h">
+    <QtMoc Include="BoxJob.h">
+      <Filter>SandMan</Filter>
+    </QtMoc>
+    <QtMoc Include="SbieProcess.h">
+      <Filter>SandMan</Filter>
+    </QtMoc>
+    <QtMoc Include="Models\MonitorModel.h">
+      <Filter>Models</Filter>
+    </QtMoc>
+    <QtMoc Include="Wizards\SetupWizard.h">
+      <Filter>Wizards</Filter>
+    </QtMoc>
+    <QtMoc Include="BoxMonitor.h">
+      <Filter>SandMan</Filter>
+    </QtMoc>
+    <QtMoc Include="Windows\SupportDialog.h">
       <Filter>Windows</Filter>
+    </QtMoc>
+    <QtMoc Include="Views\FileView.h">
+      <Filter>Views</Filter>
+    </QtMoc>
+    <QtMoc Include="OnlineUpdater.h">
+      <Filter>SandMan</Filter>
+    </QtMoc>
+    <QtMoc Include="Wizards\NewBoxWizard.h">
+      <Filter>Wizards</Filter>
+    </QtMoc>
+    <QtMoc Include="Wizards\TemplateWizard.h">
+      <Filter>Wizards</Filter>
     </QtMoc>
   </ItemGroup>
   <ItemGroup>
@@ -236,9 +332,6 @@
       <Filter>Form Files</Filter>
     </QtUic>
     <QtUic Include="Forms\SelectBoxWindow.ui">
-      <Filter>Form Files</Filter>
-    </QtUic>
-    <QtUic Include="Forms\FileBrowserWindow.ui">
       <Filter>Form Files</Filter>
     </QtUic>
   </ItemGroup>
@@ -282,6 +375,9 @@
     <None Include="sandman_it.ts">
       <Filter>Translation Files</Filter>
     </None>
+    <None Include="sandman_ko.ts">
+      <Filter>Translation Files</Filter>
+    </None>
     <None Include="sandman_nl.ts">
       <Filter>Translation Files</Filter>
     </None>
@@ -289,6 +385,12 @@
       <Filter>Translation Files</Filter>
     </None>
     <None Include="sandman_cs.ts">
+      <Filter>Translation Files</Filter>
+    </None>
+    <None Include="sandman_sv_SE.ts">
+      <Filter>Translation Files</Filter>
+    </None>
+    <None Include="sandman_vi.ts">
       <Filter>Translation Files</Filter>
     </None>
   </ItemGroup>

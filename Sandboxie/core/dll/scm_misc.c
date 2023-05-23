@@ -132,7 +132,7 @@ _FX BOOLEAN Scm_SecHostDll(HMODULE module)
     //
     // support for Windows 7 SecHost:
     // for every function that our AdvApi32 module hooks,
-    // we route the correspoding function in SecHost to AdvApi32
+    // we route the corresponding function in SecHost to AdvApi32
     //
 
     advapi = LoadLibrary(DllName_advapi32);
@@ -146,6 +146,7 @@ _FX BOOLEAN Scm_SecHostDll(HMODULE module)
         }
     }
 
+    // $HookHack$ - API Redirection
     for (i = 0; funcNamesAW[i].FuncNameA; ++i) {
 
         void *ResPtr;
@@ -156,7 +157,7 @@ _FX BOOLEAN Scm_SecHostDll(HMODULE module)
             return FALSE;
         }
 
-        ResPtr = SbieDll_Hook((char *)funcNamesAW[i].FuncNameA, SecPtr, AdvPtr);
+        ResPtr = SbieDll_Hook((char *)funcNamesAW[i].FuncNameA, SecPtr, AdvPtr, (HMODULE)-1);
         if (! ResPtr)
             return FALSE;
     }

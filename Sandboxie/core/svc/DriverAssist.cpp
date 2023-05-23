@@ -25,6 +25,8 @@
 #include <sddl.h>
 #include <stdio.h>
 #include <psapi.h>
+#include <winioctl.h>
+#include <ioapiset.h>
 
 #include "misc.h"
 #include "DriverAssist.h"
@@ -63,6 +65,12 @@ DriverAssist::DriverAssist()
 
     InitializeCriticalSection(&m_LogMessage_CritSec);
     InitializeCriticalSection(&m_critSecHostInjectedSvcs);
+}
+
+DriverAssist::~DriverAssist()
+{
+	DeleteCriticalSection(&m_LogMessage_CritSec);
+	DeleteCriticalSection(&m_critSecHostInjectedSvcs);
 }
 
 
@@ -111,7 +119,7 @@ bool DriverAssist::InitializePortAndThreads()
     ULONG i, n;
 
     //
-    // create a security descriptor with a limited dacl
+    // create a security descriptor with a limited DACL
     // owner:system, group:system, dacl(allow;generic_all;system)
     //
 
@@ -228,6 +236,8 @@ void DriverAssist::ShutdownPortAndThreads()
 
     if (PortHandle)
         NtClose(PortHandle);
+
+    CleanUpSIDs();
 }
 
 
@@ -278,6 +288,11 @@ void DriverAssist::MsgWorkerThread(void *MyMsg)
         CancelProcess(data_ptr);
 
     }
+    else if (msgid == SVC_MOUNTED_HIVE) {
+
+        MountedHive(data_ptr);
+
+    }
     else if (msgid == SVC_UNMOUNT_HIVE) {
 
         UnmountHive(data_ptr);
@@ -293,11 +308,15 @@ void DriverAssist::MsgWorkerThread(void *MyMsg)
 #ifdef NEW_INI_MODE
 
         //
-        // in case the ini was edited externaly, i.e. by notepad.exe 
-        // we update the ini cache each time the deriver reloads the ini file
+        // In case the ini was edited externally, i.e. by notepad.exe 
+        // we update the ini cache each time the driver reloads the ini file.
+        // 
+        // In newer builds the driver tells us which process issued the reload
+        // if we did it we don't need to purge the cached ini data
         //
 
-        SbieIniServer::NotifyConfigReloaded();
+        if(data_len < sizeof(ULONG) || *(ULONG*)data_ptr != GetCurrentProcessId())
+            SbieIniServer::NotifyConfigReloaded();
 #endif
 
         RestartHostInjectedSvcs();
@@ -468,7 +487,7 @@ void DriverAssist::CancelProcess(void *_msg)
 
     if (msg->reason == 0)
         SbieApi_LogEx(msg->session_id, 2314, msg->process_name);
-	else if (msg->reason != -1) // in this case we have SBIE1308 and dont want any other messages
+	else if (msg->reason != -1) // in this case we have SBIE1308 and don't want any other messages
 		SbieApi_LogEx(msg->session_id, 2314, L"%S [%d / %d]", msg->process_name, msg->process_id, msg->reason);
 }
 
@@ -477,9 +496,127 @@ extern void RestartHostInjectedSvcs();
 
 void DriverAssist::RestartHostInjectedSvcs()
 {
-    EnterCriticalSection(&m_critSecHostInjectedSvcs);
-    ::RestartHostInjectedSvcs();
-    LeaveCriticalSection(&m_critSecHostInjectedSvcs);
+    //
+    // SbieCtrl issues a refresh on every setting change,
+    // resulting in this function getting triggered way to often, 
+    // hence we implement a small workaround.
+    // The first thread to hit this monitors how many 
+    // calls go in and waits until the last one,
+    // then it starts the Job.
+    //
+
+    static volatile ULONG JobCounter = 0;
+    if (InterlockedIncrement(&JobCounter) == 1) {
+        do {
+            Sleep(250);
+        } while (JobCounter > 1);
+        EnterCriticalSection(&m_critSecHostInjectedSvcs);
+        ::RestartHostInjectedSvcs();
+        LeaveCriticalSection(&m_critSecHostInjectedSvcs);
+    }
+    InterlockedDecrement(&JobCounter);
+}
+
+
+//---------------------------------------------------------------------------
+// VolHas8dot3Support
+//---------------------------------------------------------------------------
+
+// VolumeFlags bit values (see FILE_FS_PERSISTENT_VOLUME_INFORMATION.VolumeFlags)
+#define PERSISTENT_VOLUME_STATE_SHORT_NAME_CREATION_DISABLED 0x00000001		// No 8.3 name creation on this volume
+
+//
+// Structure for FSCTL_SET_PERSISTENT_VOLUME_STATE and FSCTL_GET_PERSISTENT_VOLUME_STATE
+// The initial version will be 1.0
+//
+typedef struct _FILE_FS_PERSISTENT_VOLUME_INFORMATION {
+
+    ULONG VolumeFlags;
+    ULONG FlagMask;
+    ULONG Version;
+    ULONG Reserved;
+
+} FILE_FS_PERSISTENT_VOLUME_INFORMATION, *PFILE_FS_PERSISTENT_VOLUME_INFORMATION;
+
+// FltFsControlFile or ZwFsControlFile call # to query persistent volume info (if used in DDK)
+// CAN ALSO USE WITH: DeviceIOControl (which is what we will do)
+#define FSCTL_QUERY_PERSISTENT_VOLUME_STATE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 143, METHOD_BUFFERED, FILE_ANY_ACCESS)  // FILE_FS_PERSISTENT_VOLUME_INFORMATION
+
+BOOL VolHas8dot3Support(WCHAR* path)
+{
+    BOOL is8Dot3 = TRUE;
+
+    HANDLE hFile;
+    OBJECT_ATTRIBUTES objattrs;
+    UNICODE_STRING uni;
+    //NTSTATUS status;
+    //IO_STATUS_BLOCK MyIoStatusBlock;
+
+    RtlInitUnicodeString(&uni, path);
+    InitializeObjectAttributes(&objattrs, &uni, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    //status = NtOpenFile(&hFile, GENERIC_READ, &objattrs, &MyIoStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
+    //if (NT_SUCCESS(status)) {
+    WCHAR device[] = L"\\\\.\\X:";
+    device[4] = path[0];
+    hFile = CreateFile(device, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, (HANDLE)NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+
+        FILE_FS_PERSISTENT_VOLUME_INFORMATION inbuf = { 0 };
+	    FILE_FS_PERSISTENT_VOLUME_INFORMATION outbuf = { 0 };
+	    inbuf.FlagMask = PERSISTENT_VOLUME_STATE_SHORT_NAME_CREATION_DISABLED;
+	    inbuf.Version = 1;
+        
+        //status = NtFsControlFile(hFile, NULL, NULL, NULL, &MyIoStatusBlock, FSCTL_QUERY_PERSISTENT_VOLUME_STATE, &inbuf, sizeof(inbuf), &outbuf, sizeof(outbuf));
+        //if(NT_SUCCESS(status)) {
+        DWORD BytesReturned;
+        if(DeviceIoControl(hFile, FSCTL_QUERY_PERSISTENT_VOLUME_STATE, &inbuf, sizeof(inbuf), &outbuf, sizeof(outbuf), &BytesReturned, 0)){
+
+		    is8Dot3 = (outbuf.VolumeFlags & PERSISTENT_VOLUME_STATE_SHORT_NAME_CREATION_DISABLED) ? FALSE : TRUE;
+	    }
+
+        NtClose(hFile);
+    }
+
+    return is8Dot3;
+}
+
+
+//---------------------------------------------------------------------------
+// MountedHive
+//---------------------------------------------------------------------------
+
+
+void DriverAssist::MountedHive(void *_msg)
+{
+    SVC_REGHIVE_MSG *msg = (SVC_REGHIVE_MSG *)_msg;
+
+    if (SbieApi_QueryConfBool(msg->boxname, L"EnableVerboseChecks", FALSE)) {
+
+        NTSTATUS status;
+        ULONG len = 0;
+        WCHAR* path;
+
+        status = SbieApi_QueryBoxPath(msg->boxname, NULL, NULL, NULL, &len, NULL, NULL);
+        if (status != 0) return;
+
+        path = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, len + 16);
+        if (!path) return;
+
+        status = SbieApi_QueryBoxPath(msg->boxname, path, NULL, NULL, &len, NULL, NULL);
+        if (status == 0 && wcslen(path) > 22) {
+
+            if (SbieDll_TranslateNtToDosPath(path)) {
+
+                if (!VolHas8dot3Support(path)) {
+
+                    SbieApi_LogEx(msg->session_id, 2227, L"%S (%S)", msg->boxname, path);
+                }
+            }
+        }
+
+        HeapFree(GetProcessHeap(), 0, path);
+    }
 }
 
 
@@ -490,7 +627,7 @@ void DriverAssist::RestartHostInjectedSvcs()
 
 void DriverAssist::UnmountHive(void *_msg)
 {
-    SVC_UNMOUNT_MSG *msg = (SVC_UNMOUNT_MSG *)_msg;
+    SVC_REGHIVE_MSG *msg = (SVC_REGHIVE_MSG *)_msg;
     ULONG rc, retries;
 
     //

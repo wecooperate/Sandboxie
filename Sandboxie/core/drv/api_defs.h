@@ -77,6 +77,7 @@
 
 #define API_MAX_PIDS                512
 
+#define MAX_REG_ROOT_LEN            256
 
 //---------------------------------------------------------------------------
 // Driver API Codes
@@ -155,6 +156,11 @@ enum {
     API_OPEN_DYNAMIC_PORT,
     API_QUERY_DRIVER_INFO,
     API_FILTER_TOKEN,
+    API_SET_SECURE_PARAM,
+    API_GET_SECURE_PARAM,
+    API_MONITOR_GET2,
+    API_PROTECT_ROOT,
+    API_UNPROTECT_ROOT,
 
     API_LAST
 };
@@ -174,6 +180,7 @@ enum {
     SVC_UNMOUNT_HIVE,
     SVC_LOG_MESSAGE,
     SVC_CONFIG_UPDATED,
+    SVC_MOUNTED_HIVE,
 
     SVC_LAST
 };
@@ -194,6 +201,7 @@ enum {
 
 API_ARGS_BEGIN(API_GET_VERSION_ARGS)
 API_ARGS_FIELD(WCHAR *,string)
+API_ARGS_FIELD(ULONG *,abi_ver)
 API_ARGS_CLOSE(API_GET_VERSION_ARGS)
 
 
@@ -344,8 +352,14 @@ API_ARGS_FIELD(ULONG, log_type)
 API_ARGS_FIELD(ULONG, log_len)
 API_ARGS_FIELD(WCHAR *, log_ptr)
 API_ARGS_FIELD(BOOLEAN,check_object_exists)
+API_ARGS_FIELD(BOOLEAN,is_message)
 //API_ARGS_FIELD(ULONG, log_aux)
 API_ARGS_CLOSE(API_MONITOR_PUT2_ARGS)
+
+API_ARGS_BEGIN(API_MONITOR_GET2_ARGS)
+API_ARGS_FIELD(WCHAR *, buffer_ptr)
+API_ARGS_FIELD(ULONG *, buffer_len)
+API_ARGS_CLOSE(API_MONITOR_GET2_ARGS)
 
 API_ARGS_BEGIN(API_GET_UNMOUNT_HIVE_ARGS)
 API_ARGS_FIELD(WCHAR *,path)
@@ -398,6 +412,8 @@ API_ARGS_CLOSE(API_SESSION_LEADER_ARGS)
 
 API_ARGS_BEGIN(API_IS_BOX_ENABLED_ARGS)
 API_ARGS_FIELD(WCHAR *,box_name)
+API_ARGS_FIELD(WCHAR *,sid_string)
+API_ARGS_FIELD(ULONG, session_id)
 API_ARGS_CLOSE(API_IS_BOX_ENABLED_ARGS)
 
 
@@ -459,6 +475,11 @@ API_ARGS_FIELD(VOID *,info_data)
 API_ARGS_FIELD(ULONG ,info_len)
 API_ARGS_CLOSE(API_QUERY_DRIVER_INFO_ARGS)
 
+API_ARGS_BEGIN(API_SECURE_PARAM_ARGS)
+API_ARGS_FIELD(WCHAR *,param_name)
+API_ARGS_FIELD(VOID* ,param_data)
+API_ARGS_FIELD(ULONG ,param_size)
+API_ARGS_CLOSE(API_SECURE_PARAM_ARGS)
 
 #undef API_ARGS_BEGIN
 #undef API_ARGS_FIELD
@@ -492,13 +513,13 @@ typedef struct _SVC_PROCESS_MSG {
 } SVC_PROCESS_MSG;
 
 
-typedef struct _SVC_UNMOUNT_MSG {
+typedef struct _SVC_REGHIVE_MSG {
 
     ULONG process_id;
     ULONG session_id;
-    WCHAR boxname[34];
+    WCHAR boxname[BOXNAME_COUNT];
 
-} SVC_UNMOUNT_MSG;
+} SVC_REGHIVE_MSG;
 
 
 //---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ public:
 
 	virtual void					UpdateDetails();
 
+	virtual void					SetBoxPaths(const QString& FilePath, const QString& RegPath, const QString& IpcPath);
 	virtual QString					GetFileRoot() const { return m_FilePath; }
 	virtual QString					GetRegRoot() const { return m_RegPath; }
 	virtual QString					GetIpcRoot() const { return m_IpcPath; }
@@ -54,6 +55,7 @@ public:
 	virtual SB_STATUS				RunSandboxed(const QString& Command);
 	virtual SB_STATUS				TerminateAll();
 
+	virtual void					OpenBox() {}
 	virtual void					CloseBox() {}
 
 	virtual bool					IsEnabled() const  { return m_IsEnabled; }
@@ -65,7 +67,9 @@ public:
 	virtual SB_STATUS				RenameBox(const QString& NewName);
 	virtual SB_STATUS				RemoveBox();
 
-	virtual QList<SBoxSnapshot>		GetSnapshots(QString* pCurrent = NULL, QString* pDefault = NULL) const;
+	virtual QString					Expand(const QString& Value);
+
+	virtual QMap<QString, SBoxSnapshot>	GetSnapshots(QString* pCurrent = NULL, QString* pDefault = NULL) const;
 	virtual void					SetDefaultSnapshot(QString Default);
 	virtual QString					GetDefaultSnapshot(QString* pCurrent = NULL) const;
 	virtual SB_PROGRESS				TakeSnapshot(const QString& Name);
@@ -92,6 +96,7 @@ protected:
 	
 	QMap<quint32, CBoxedProcessPtr>	m_ProcessList;
 	int								m_ActiveProcessCount;
+	bool							m_ActiveProcessDirty;
 
 //private:
 //	struct SSandBox* m;

@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020 David Xanatos, xanasoft.com
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -25,7 +25,6 @@
 #include "common/win32_ntddk.h"
 #include "misc.h"
 #include "ImageHlp.h"
-
 
 
 
@@ -55,7 +54,9 @@ void DriverAssist::InjectLow(void *_msg)
 {
 	SVC_PROCESS_MSG *msg = (SVC_PROCESS_MSG *)_msg;
 
+    NTSTATUS status = 0;
 	ULONG errlvl = 0;
+    UCHAR SandboxieLogonSid[SECURITY_MAX_SID_SIZE] = { 0 };
 		
 	//
 	// open new process and verify process creation time
@@ -68,8 +69,9 @@ void DriverAssist::InjectLow(void *_msg)
 		goto finish;
 	}
 
-	WCHAR boxname[48];
-	errlvl = SbieApi_QueryProcessEx2((HANDLE)msg->process_id, 0, boxname, NULL, NULL, NULL, NULL);
+	WCHAR boxname[BOXNAME_COUNT];
+    WCHAR exename[99];
+	errlvl = SbieApi_QueryProcessEx2((HANDLE)msg->process_id, 96, boxname, exename, NULL, NULL, NULL);
 	if (errlvl != 0)
 		goto finish;
 
@@ -79,8 +81,9 @@ void DriverAssist::InjectLow(void *_msg)
 
     SBIELOW_FLAGS sbieLow;
     sbieLow.init_flags = 0;
-
+#ifndef _M_ARM64
     sbieLow.is_wow64 = msg->is_wow64;
+#endif
     sbieLow.bHostInject = msg->bHostInject;
     // NoSysCallHooks BEGIN
     sbieLow.bNoSysHooks = SbieApi_QueryConfBool(boxname, L"NoSecurityIsolation", FALSE) || SbieApi_QueryConfBool(boxname, L"NoSysCallHooks", FALSE);
@@ -115,7 +118,12 @@ void DriverAssist::InjectLow(void *_msg)
     // notify driver that we successfully injected the lowlevel code
     //
 
-    if (SbieApi_Call(API_INJECT_COMPLETE, 1, (ULONG_PTR)msg->process_id) == 0)
+    if (GetSandboxieSID(boxname, SandboxieLogonSid, sizeof(SandboxieLogonSid)))
+        status = SbieApi_Call(API_INJECT_COMPLETE, 2, (ULONG_PTR)msg->process_id, SandboxieLogonSid);
+    else // if that fails or is not enabled we fall back to using the anonymous logon token
+        status = SbieApi_Call(API_INJECT_COMPLETE, 1, (ULONG_PTR)msg->process_id);
+
+    if (status == 0)
         errlvl = 0;
     else
         errlvl = 0x99;
@@ -126,6 +134,13 @@ void DriverAssist::InjectLow(void *_msg)
 
 finish:
 
+#ifdef _M_ARM64
+    if (errlvl == -1)
+        SbieApi_LogEx(msg->session_id, 2338, L"%S (ARM32)", msg->process_name);
+    else if (errlvl == -2)
+        SbieApi_LogEx(msg->session_id, 2338, L"%S (CHPE)", msg->process_name);
+    else 
+#endif
     if (errlvl) {
 
         ULONG err = GetLastError();
@@ -135,8 +150,10 @@ finish:
 
     if (hProcess) {
 
-        if (errlvl)
-            TerminateProcess(hProcess, 1);
+        if (errlvl) {
+            SbieApi_Call(API_INJECT_COMPLETE, 3, (ULONG_PTR)msg->process_id, NULL, errlvl);
+            //TerminateProcess(hProcess, 1);
+        }
 
         CloseHandle(hProcess);
     }

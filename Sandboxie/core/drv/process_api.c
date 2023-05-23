@@ -83,7 +83,7 @@ _FX NTSTATUS Process_Api_Start(PROCESS *proc, ULONG64 *parms)
     if (user_box_parm < 0) {
 
         //
-        // if paramter is negative, it specifies the pid number for a
+        // if parameter is negative, it specifies the pid number for a
         // process, from which we copy the box information, including
         // SID and session
         //
@@ -111,7 +111,7 @@ _FX NTSTATUS Process_Api_Start(PROCESS *proc, ULONG64 *parms)
         // thread impersonation token specifies SID and session
         //
 
-        WCHAR boxname[34];
+        WCHAR boxname[BOXNAME_COUNT];
 
         void *TokenObject;
         BOOLEAN CopyOnOpen;
@@ -408,7 +408,7 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
 
         } else if (args->info_type.val == 'ptok') { // primary token
 
-			if(is_caller_sandboxed || !Session_CheckAdminAccess(TRUE))
+			if(is_caller_sandboxed)
 				status = STATUS_ACCESS_DENIED;
 			else
 			{
@@ -418,9 +418,12 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
 					ObReferenceObject(PrimaryTokenObject);
 
                     //ACCESS_MASK access = (PsGetCurrentProcessId() != Api_ServiceProcessId) ? TOKEN_ALL_ACCESS : (TOKEN_QUERY | TOKEN_DUPLICATE);
+                    ACCESS_MASK access = TOKEN_QUERY | TOKEN_QUERY_SOURCE;
+                    if (Session_CheckAdminAccess(TRUE))
+                        access |= TOKEN_DUPLICATE;
 
 					HANDLE MyTokenHandle;
-					status = ObOpenObjectByPointer(PrimaryTokenObject, 0, NULL, TOKEN_QUERY | TOKEN_DUPLICATE, *SeTokenObjectType, UserMode, &MyTokenHandle);
+					status = ObOpenObjectByPointer(PrimaryTokenObject, 0, NULL, access, *SeTokenObjectType, UserMode, &MyTokenHandle);
 
 					ObDereferenceObject(PrimaryTokenObject);
 
@@ -432,26 +435,28 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
 
 		} else if (args->info_type.val == 'itok' || args->info_type.val == 'ttok') { // impersonation token / test thread token
 
-			if(is_caller_sandboxed || (args->info_type.val == 'itok' && !Session_CheckAdminAccess(TRUE)))
+			if(is_caller_sandboxed)
 				status = STATUS_ACCESS_DENIED;
+            else if(!proc->threads_lock)
+                status = STATUS_NOT_FOUND;
 			else
 			{
                 HANDLE tid = (HANDLE)(args->ext_data.val);
 
-                THREAD *thrd = Thread_GetByThreadId(proc, tid);
+                KIRQL irql2;
+                KeRaiseIrql(APC_LEVEL, &irql2);
+                ExAcquireResourceExclusiveLite(proc->threads_lock, TRUE);
+
+                THREAD *thrd = Thread_GetOrCreate(proc, tid, FALSE);
 				if (thrd)
 				{
                     if (args->info_type.val == 'ttok')
                     {
                         *data = thrd->token_object ? TRUE : FALSE;
                     }
-                    else
+                    else //if (args->info_type.val == 'itok')
                     {
-                        KIRQL irql2;
                         void* ImpersonationTokenObject;
-
-                        KeRaiseIrql(APC_LEVEL, &irql2);
-                        ExAcquireResourceExclusiveLite(proc->threads_lock, TRUE);
 
                         ImpersonationTokenObject = thrd->token_object;
 
@@ -459,13 +464,14 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
                             ObReferenceObject(ImpersonationTokenObject);
                         }
 
-                        ExReleaseResourceLite(proc->threads_lock);
-                        KeLowerIrql(irql2);
-
                         if (ImpersonationTokenObject)
                         {
+                            ACCESS_MASK access = TOKEN_QUERY | TOKEN_QUERY_SOURCE;
+                            if (Session_CheckAdminAccess(TRUE))
+                                access |= TOKEN_DUPLICATE;
+
                             HANDLE MyTokenHandle;
-                            status = ObOpenObjectByPointer(ImpersonationTokenObject, 0, NULL, TOKEN_QUERY | TOKEN_DUPLICATE, *SeTokenObjectType, UserMode, &MyTokenHandle);
+                            status = ObOpenObjectByPointer(ImpersonationTokenObject, 0, NULL, access, *SeTokenObjectType, UserMode, &MyTokenHandle);
 
                             ObDereferenceObject(ImpersonationTokenObject);
 
@@ -474,9 +480,14 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
                         else
                             status = STATUS_NO_IMPERSONATION_TOKEN;
                     }
+                    //else
+                    //    status = STATUS_INVALID_PARAMETER;
 				}
 				else
 					status = STATUS_NOT_FOUND;
+
+                ExReleaseResourceLite(proc->threads_lock);
+                KeLowerIrql(irql2);
 			}
 
 		} else if (args->info_type.val == 'ippt') { // is primary process token
@@ -497,8 +508,7 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
             if (ProcessId != 0)
                 status = STATUS_ACCESS_DENIED;
             
-            if(proc->detected_image_type == -1)
-                proc->detected_image_type = (ULONG)(args->ext_data.val);
+            proc->detected_image_type = (ULONG)(args->ext_data.val);
 
             *data = 0;
 
@@ -551,7 +561,7 @@ _FX NTSTATUS Process_Api_QueryBoxPath(PROCESS *proc, ULONG64 *parms)
 
     } else {
 
-        WCHAR boxname[34];
+        WCHAR boxname[BOXNAME_COUNT];
         BOOLEAN ok = Api_CopyBoxNameFromUser(
             boxname, (WCHAR *)args->box_name.val);
         if (! ok)
@@ -785,6 +795,9 @@ _FX NTSTATUS Process_Api_QueryPathList(PROCESS *proc, ULONG64 *parms)
     } else if (args->path_code.val == 'ic') {
         list   = &proc->closed_ipc_paths;
         lock   =  proc->ipc_lock;
+    } else if (args->path_code.val == 'ir') {
+        list   = &proc->read_ipc_paths;
+        lock   =  proc->ipc_lock;
 
     } else if (args->path_code.val == 'wo') {
         list   = &proc->open_win_classes;
@@ -944,7 +957,7 @@ _FX NTSTATUS Process_Enumerate(
 #ifdef USE_PROCESS_MAP
 
         //
-        // quick shortcut for global count retrival
+        // quick shortcut for global count retrieval
         //
 
         if (pids == NULL && (! boxname[0]) && all_sessions) { // no pids, all boxes, all sessions
@@ -1009,10 +1022,10 @@ _FX NTSTATUS Process_Api_Enum(PROCESS *proc, ULONG64 *parms)
     NTSTATUS status;
     ULONG count;
     ULONG *user_pids;                   // user mode ULONG [512]
-    WCHAR *user_boxname;                // user mode WCHAR [34]
+    WCHAR *user_boxname;                // user mode WCHAR [BOXNAME_COUNT]
     BOOLEAN all_sessions;
     ULONG session_id;
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
     ULONG *user_count;
 
     // get boxname from second parameter
@@ -1022,9 +1035,9 @@ _FX NTSTATUS Process_Api_Enum(PROCESS *proc, ULONG64 *parms)
         wcscpy(boxname, proc->box->name);
     user_boxname = (WCHAR *)parms[2];
     if ((! boxname[0]) && user_boxname) {
-        ProbeForRead(user_boxname, sizeof(WCHAR) * 32, sizeof(UCHAR));
+        ProbeForRead(user_boxname, sizeof(WCHAR) * (BOXNAME_COUNT - 2), sizeof(UCHAR));
         if (user_boxname[0])
-            wcsncpy(boxname, user_boxname, 32);
+            wcsncpy(boxname, user_boxname, (BOXNAME_COUNT - 2));
     }
 
     // get "all users/current user only" flag from third parameter

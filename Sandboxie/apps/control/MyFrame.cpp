@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -139,12 +140,16 @@ BEGIN_MESSAGE_MAP(CMyFrame, CFrameWnd)
     ON_COMMAND(ID_CONF_EDIT,                    OnCmdConfEdit)
     ON_COMMAND(ID_CONF_RELOAD,                  OnCmdConfReload)
 
-	ON_COMMAND(ID_HELP_SUPPORT,                 OnCmdHelpSupport)
+    ON_COMMAND(ID_HELP_SUPPORT,                 OnCmdHelpSupport)
+    ON_COMMAND(ID_HELP_CONTRIBUTION,            OnCmdHelpContribution)
     ON_COMMAND(ID_HELP_TOPICS,                  OnCmdHelpTopics)
     ON_COMMAND(ID_HELP_TUTORIAL,                OnCmdHelpTutorial)
     ON_COMMAND(ID_HELP_FORUM,                   OnCmdHelpForum)
-	ON_COMMAND(ID_HELP_UPDATE,                  OnCmdHelpUpdate)
+    ON_COMMAND(ID_HELP_UPDATE,                  OnCmdHelpUpdate)
     ON_COMMAND(ID_HELP_UPGRADE,                 OnCmdHelpUpgrade)
+    ON_COMMAND(ID_HELP_MIGRATION,               OnCmdHelpMigrate)
+    ON_COMMAND(ID_HELP_GET_CERT,                OnCmdHelpGetCert)
+    ON_COMMAND(ID_HELP_SET_CERT,                OnCmdHelpSetCert)
     ON_COMMAND(ID_HELP_ABOUT,                   OnCmdHelpAbout)
 
 	//ON_MESSAGE(WM_UPDATERESULT,					OnUpdateResult)
@@ -416,6 +421,18 @@ void CMyFrame::InitMenus(void)
 
     CMenu *pMenu = CMyApp::MyLoadMenu(L"TOP_MENU");
 
+    const int menuIndex = 5;
+    MENUITEMINFO mii;
+    WCHAR text[128];
+    memzero(&mii, sizeof(MENUITEMINFO));
+    mii.cbSize = sizeof(MENUITEMINFO);
+    mii.fMask = MIIM_ID | MIIM_STRING;
+    mii.dwTypeData = text;
+    mii.cch = 120;
+    ::GetMenuItemInfo(*pMenu, menuIndex, TRUE, &mii);
+    mii.fMask = MIIM_TYPE;
+    mii.fType |= MFT_RIGHTJUSTIFY;
+    ::SetMenuItemInfo(*pMenu, menuIndex, TRUE, &mii);
 
     //
     // activate main menu
@@ -981,6 +998,15 @@ void CMyFrame::OnCmdHelpSupport()
 	CRunBrowser x(this, L"https://sandboxie-plus.com/go.php?to=donate");
 }
 
+//---------------------------------------------------------------------------
+// OnCmdHelpContribution
+//---------------------------------------------------------------------------
+
+
+void CMyFrame::OnCmdHelpContribution()
+{
+	CRunBrowser x(this, L"https://sandboxie-plus.com/go.php?to=sbie-contribute");
+}
 
 //---------------------------------------------------------------------------
 // OnCmdHelpTopics
@@ -991,7 +1017,6 @@ void CMyFrame::OnCmdHelpTopics()
 {
     CRunBrowser::OpenHelp(this, L"HelpTopics");
 }
-
 
 //---------------------------------------------------------------------------
 // OnCmdHelpTutorial
@@ -1037,6 +1062,44 @@ void CMyFrame::OnCmdHelpUpgrade()
 {
 	CRunBrowser x(this, L"https://sandboxie-plus.com/go.php?to=sbie-plus&tip=upgrade");
 }
+
+//---------------------------------------------------------------------------
+// OnCmdHelpMigrate
+//---------------------------------------------------------------------------
+
+extern "C" void OpenWebView(const WCHAR * url, const WCHAR * title);
+
+void CMyFrame::OnCmdHelpMigrate()
+{
+    CString url;
+    url.Format(L"https://sandboxie-plus.com/go.php?to=sbie-migration&language=%d", SbieDll_GetLanguage(NULL));
+    CMyMsg text(MSG_3468);
+    OpenWebView(url, text);
+}
+
+
+//---------------------------------------------------------------------------
+// OnCmdHelpGetCert
+//---------------------------------------------------------------------------
+
+
+void CMyFrame::OnCmdHelpGetCert()
+{
+    CRunBrowser x(this, L"https://sandboxie-plus.com/go.php?to=sbie-get-cert");
+}
+
+
+//---------------------------------------------------------------------------
+// OnCmdHelpSetCert
+//---------------------------------------------------------------------------
+
+void ApplyCertificate();
+
+void CMyFrame::OnCmdHelpSetCert()
+{
+    ApplyCertificate();
+}
+
 
 //---------------------------------------------------------------------------
 // OnCmdHelpAbout

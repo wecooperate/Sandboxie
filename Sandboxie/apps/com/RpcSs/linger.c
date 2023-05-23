@@ -363,26 +363,20 @@ int DoLingerLeader(void)
             SbieDll_StartBoxedService(image, TRUE);
         }
 
+        ULONG buf_len = 4096 * sizeof(WCHAR);
+        WCHAR* buf1 = HeapAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS | HEAP_ZERO_MEMORY, buf_len);
+
         for (i = 0; ; ++i) {
 
             rc = SbieApi_QueryConfAsIs(
-                NULL, L"StartProgram", i, image, sizeof(WCHAR) * 120);
+                NULL, L"StartProgram", i, buf1, buf_len - 16);
             if (rc != 0)
                 break;
 
-            SbieDll_ExpandAndRunProgram(image);
+            SbieDll_ExpandAndRunProgram(buf1);
         }
 
-        WCHAR Cmd[8191];
-        for (i = 0; ; ++i) {
-
-            rc = SbieApi_QueryConfAsIs(
-                NULL, L"StartCommand", i, Cmd, sizeof(Cmd));
-            if (rc != 0)
-                break;
-
-            SbieDll_RunStartExe(Cmd, NULL);
-        }
+        HeapFree(GetProcessHeap(), 0, buf1);
     }
 
     //
@@ -406,7 +400,7 @@ int DoLingerLeader(void)
         process_count += 128;
 
         ULONG* pids = HeapAlloc(
-            GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, sizeof(ULONG) * (process_count + 1)); // allocate oen more for the -1 marker
+            GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, sizeof(ULONG) * (process_count + 1)); // allocate one more for the -1 marker
         SbieApi_EnumProcessEx(NULL, FALSE, -1, pids, &process_count); // query pids
         pids[process_count] = -1; // set the end marker
 
@@ -457,7 +451,7 @@ int DoLingerLeader(void)
                     // (via forced mechanism or as a child of start.exe)
                     // and then don't terminate it as a linger
                     //
-                    // (note that sevice processes running as local system
+                    // (note that service processes running as local system
                     // are also children of start.exe, but in that case,
                     // is_local_system_sid would be TRUE and we would not
                     // reach this point.)
@@ -606,6 +600,9 @@ do_kill_all:
             break;
         }
     }
+
+	// cleanup CS
+	DeleteCriticalSection(&ProcessCritSec);
 
     // this process is no longer needed
 

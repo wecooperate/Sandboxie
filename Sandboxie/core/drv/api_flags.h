@@ -28,6 +28,7 @@
 //---------------------------------------------------------------------------
 
 
+#define CONF_JUST_EXPAND				0x80000000L
 #define CONF_GET_NO_GLOBAL				0x40000000L
 #define CONF_GET_NO_EXPAND				0x20000000L
 #define CONF_GET_NO_TEMPLS				0x10000000L
@@ -128,7 +129,9 @@
 #define SBIE_FEATURE_FLAG_COMPARTMENTS	0x00000008
 #define SBIE_FEATURE_FLAG_SBIE_LOGIN    0x00000010
 #define SBIE_FEATURE_FLAG_WIN32K_HOOK   0x00000020
+#define SBIE_FEATURE_FLAG_SECURITY_MODE	0x00000040
 
+#define SBIE_FEATURE_FLAG_NEW_ARCH		0x40000000
 #define SBIE_FEATURE_FLAG_CERTIFIED		0x80000000
 
 //---------------------------------------------------------------------------

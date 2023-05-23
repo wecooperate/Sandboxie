@@ -27,6 +27,9 @@
 #include "api.h"
 #include "util.h"
 #include "common/my_version.h"
+#ifdef _M_ARM64
+#include "common/arm64_asm.h"
+#endif
 #include "session.h"
 
 
@@ -50,8 +53,6 @@ NTSTATUS Sbie_SepFilterToken_KernelMode(
     ULONG_PTR   LengthIncrease,
     void        **NewToken
 );
-
-BOOLEAN Token_Init_SbieLogin(void);
 
 static BOOLEAN Token_Init_SepFilterToken(void);
 
@@ -150,7 +151,7 @@ static UCHAR AnonymousLogonSid[12] = {
     SECURITY_ANONYMOUS_LOGON_RID,0,0,0      // SubAuthority
 };
 
-UCHAR SandboxieLogonSid[SECURITY_MAX_SID_SIZE] = { 0 }; // SbieLogin
+//UCHAR SandboxieLogonSid[SECURITY_MAX_SID_SIZE] = { 0 }; // SbieLogin
 
 static UCHAR SystemLogonSid[12] = {
 	1,                                      // Revision
@@ -221,15 +222,6 @@ _FX BOOLEAN Token_Init(void)
 
 #undef MySetGroup
 
-	//
-	// find the sid of the sandboxie user if present
-	//
-
-	// SbieLogin BEGIN
-	if (Conf_Get_Boolean(NULL, L"AllowSandboxieLogon", 0, FALSE))
-        Token_Init_SbieLogin();
-	// SbieLogin END
-
     //
     // find SepFilterToken for Token_RestrictHelper1
     //
@@ -252,27 +244,27 @@ _FX BOOLEAN Token_Init(void)
 //---------------------------------------------------------------------------
 
 
-_FX BOOLEAN Token_Init_SbieLogin(void)
-{
-    WCHAR AccountBuffer[64]; // DNLEN + 1 + sizeof(SANDBOXIE_USER) + reserve
-	UNICODE_STRING AccountName = { 0, sizeof(AccountBuffer), AccountBuffer }; // Note: max valid length is (DNLEN (15) + 1) * sizeof(WCHAR), length is in bytes leave half empty
-	if (GetRegString(RTL_REGISTRY_ABSOLUTE, L"\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName", L"ComputerName", &AccountName) && AccountName.Length < 64)
-	{
-		wcscpy(AccountName.Buffer + (AccountName.Length / sizeof(WCHAR)), L"\\" SANDBOXIE_USER);
-		AccountName.Length += (1 + wcslen(SANDBOXIE_USER)) * sizeof(WCHAR);
-		//DbgPrint("Sbie, AccountName: %S\n", AccountName.Buffer);
-
-		SID_NAME_USE use;
-		ULONG userSize = sizeof(SandboxieLogonSid), domainSize = 0;
-		WCHAR DomainBuff[20]; // doesn't work without this
-		UNICODE_STRING DomainName = { 0, sizeof(DomainBuff), DomainBuff };
-
-		SecLookupAccountName(&AccountName, &userSize, (PSID)SandboxieLogonSid, &use, &domainSize, &DomainName);
-		//DbgPrint("Sbie, SecLookupAccountName: %x; size:%d %d\n", status, userSize, domainSize);
-	}
-
-    return TRUE;
-}
+//_FX BOOLEAN Token_Init_SbieLogin(void)
+//{
+//    WCHAR AccountBuffer[64]; // DNLEN + 1 + sizeof(SANDBOXIE_USER) + reserve
+//	UNICODE_STRING AccountName = { 0, sizeof(AccountBuffer), AccountBuffer }; // Note: max valid length is (DNLEN (15) + 1) * sizeof(WCHAR), length is in bytes leave half empty
+//	if (NT_SUCCESS(GetRegString(RTL_REGISTRY_ABSOLUTE, L"\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName", L"ComputerName", &AccountName)) && AccountName.Length < 64)
+//	{
+//		wcscpy(AccountName.Buffer + (AccountName.Length / sizeof(WCHAR)), L"\\" SANDBOXIE_USER);
+//		AccountName.Length += (1 + wcslen(SANDBOXIE_USER)) * sizeof(WCHAR);
+//		//DbgPrint("Sbie, AccountName: %S\n", AccountName.Buffer);
+//
+//		SID_NAME_USE use;
+//		ULONG userSize = sizeof(SandboxieLogonSid), domainSize = 0;
+//		WCHAR DomainBuff[20]; // doesn't work without this
+//		UNICODE_STRING DomainName = { 0, sizeof(DomainBuff), DomainBuff };
+//
+//		SecLookupAccountName(&AccountName, &userSize, (PSID)SandboxieLogonSid, &use, &domainSize, &DomainName);
+//		//DbgPrint("Sbie, SecLookupAccountName: %x; size:%d %d\n", status, userSize, domainSize);
+//	}
+//
+//    return TRUE;
+//}
 
 
 //---------------------------------------------------------------------------
@@ -294,6 +286,35 @@ _FX BOOLEAN Token_Init_SepFilterToken(void)
     RtlInitUnicodeString(&uni, L"SeFilterToken");
     ptr = MmGetSystemRoutineAddress(&uni);
     if (ptr) {
+
+#ifdef _M_ARM64
+
+        ULONG i;
+        for (i = 0; i < 256; i += 4) {
+
+            //
+            // ARM64: look for "BL SepFilterToken"
+            //
+
+            BL bl;
+            bl.OP = *(ULONG*)ptr;
+
+            if (bl.op1 == 0b00101 && bl.op2 == 0b1) {
+
+                LONG delta = (bl.imm26 << 2); // * 4
+                if (delta & (1 << 27)) // if this is negative
+                    delta |= 0xF0000000; // make it properly negative
+
+                Token_SepFilterToken = (P_SepFilterToken)(ptr + delta);
+                DbgPrint("SepFilterToken: %p\n", Token_SepFilterToken);
+
+                break;
+            }
+
+            ptr += 4;
+        }
+
+#else !_M_ARM64
 
         ULONG i;
         for (i = 0; i < 256; ++i) {
@@ -342,6 +363,8 @@ _FX BOOLEAN Token_Init_SepFilterToken(void)
 
             ++ptr;
         }
+
+#endif _M_ARM64
     }
 
     if (!Token_SepFilterToken) {
@@ -496,19 +519,9 @@ _FX void *Token_FilterPrimary(PROCESS *proc, void *ProcessObject)
 
     // DbgPrint("   Process Token %08X - %d <%S>\n", PrimaryToken, proc->pid, proc->image_name);
 
-    proc->drop_rights =
-        Conf_Get_Boolean(proc->box->name, L"DropAdminRights", 0, FALSE);
+    proc->drop_rights = proc->use_security_mode || Process_GetConf_bool(proc, L"DropAdminRights", FALSE);
 
     DropRights = (proc->drop_rights ? -1 : 0);
-
-    //
-    // special allowance for MSIServer - it does not seem to be needed with the CreateWaitableTimerW hook
-    //
-    //if (DropRights && !proc->image_from_box && _wcsicmp(proc->image_name, L"msiexec.exe") == 0
-    //    && Conf_Get_Boolean(proc->box->name, L"MsiInstallerExemptions", 0, FALSE)) 
-    //{
-    //    DropRights = 0;
-    //}
 
     // DbgPrint("   Drop rights %d - %d <%S>\n", proc->drop_rights, proc->pid, proc->image_name);
 
@@ -1009,7 +1022,7 @@ _FX BOOLEAN Token_ResetPrimary(PROCESS *proc)
                     ((ULONG_PTR)TokenObject + UserAndGroups_offset);
 
                 // Windows 8.1 update
-                if (SidAndAttrsInToken->Sid == (PSID)AnonymousLogonSid || SidAndAttrsInToken->Sid == (PSID)SandboxieLogonSid)
+                if (SidAndAttrsInToken->Sid == (PSID)proc->SandboxieLogonSid)
                 {
 					//DbgPrint("Sbie, restore token pointer\n");
 
@@ -1270,27 +1283,12 @@ _FX void *Token_RestrictHelper1(
             UCHAR *SidInToken = (UCHAR *)SidAndAttrsInToken->Sid;
             if (SidInToken && SidInToken[1] >= 1) { // SubAuthorityCount >= 1
 
-				PSID NewSid = NULL;
-                
-                // SbieLogin BEGIN
-				if (Conf_Get_Boolean(proc->box->name, L"SandboxieLogon", 0, FALSE))
-				{
-					if (SandboxieLogonSid[0] != 0)
-						NewSid = (PSID)SandboxieLogonSid;
-					else
-						status = STATUS_UNSUCCESSFUL;
-				}
-				else
-				// SbieLogin END
-
-                // debug tip. To disable anonymous logon, set AnonymousLogon=n
-
-                if (Conf_Get_Boolean(proc->box->name, L"AnonymousLogon", 0, TRUE))
+                if (!proc->SandboxieLogonSid && Conf_Get_Boolean(proc->box->name, L"AnonymousLogon", 0, TRUE))
                 {
-					NewSid = (PSID)AnonymousLogonSid;
+					proc->SandboxieLogonSid = (PSID)AnonymousLogonSid;
                 }
 
-				if (NewSid != NULL)
+				if (proc->SandboxieLogonSid)
 				{
 					//  In windows 8.1 Sid can be in two difference places. One is relative to SidAndAttrsInToken. 
 					//  By debugger, the offset is 0xf0 after SidAndAttrsInToken. The other one is with KB2919355, 
@@ -1306,14 +1304,14 @@ _FX void *Token_RestrictHelper1(
 					
 					// When trying apply the SbieLogin token to a system process there is not enough space in the SID
 					// so we need to use a workaround not unlike the one for win 8
-						|| (RtlLengthSid(SidInToken) < RtlLengthSid(NewSid))
+						|| (RtlLengthSid(SidInToken) < RtlLengthSid(proc->SandboxieLogonSid))
 						) {
 
 						//DbgPrint("Sbie, hack token pointer\n");
-						SidAndAttrsInToken->Sid = (PSID)NewSid;
+						SidAndAttrsInToken->Sid = proc->SandboxieLogonSid;
 					}
 					else {
-						memcpy(SidInToken, NewSid, RtlLengthSid(NewSid));
+						memcpy(SidInToken, proc->SandboxieLogonSid, RtlLengthSid(proc->SandboxieLogonSid));
 					}
 				}
             }
@@ -1452,7 +1450,7 @@ _FX void *Token_RestrictHelper3(
 
         BOOLEAN UserSidAlreadyInGroups = FALSE;
         BOOLEAN AnonymousLogonSidAlreadyInGroups = FALSE;
-		// todo: should we do somethign with SandboxieLogonSid here?
+		// todo: should we do something with SandboxieLogonSid here?
         BOOLEAN KeepUserGroup = Conf_Get_Boolean(proc->box->name, L"KeepUserGroup", 0, FALSE);
 
         n = 0;
@@ -1580,17 +1578,23 @@ _FX NTSTATUS Token_AssignPrimaryHandle(
     // on Windows Vista and later, we need to clear the PrimaryTokenFrozen
     // bit in the EPROCESS structure before we can replace the primary token
 
-    // Hard Offset Dependency
+    // $Offset$ - Hard Offset Dependency
 
     // dt nt!_eprocess
 
     if (Driver_OsVersion >= DRIVER_WINDOWS_VISTA) {
 
-        ULONG Flags2_Offset;                // EPROCESS.Flags2
+        ULONG Flags2_Offset = 0;                // EPROCESS.Flags2
         ULONG SignatureLevel_Offset;        // EPROCESS.SignatureLevel
         ULONG MitigationFlags_Offset = 0;   // EPROCESS.MitigationFlags
-        PROCESS_INFO myProcessInfo;
-#ifdef _WIN64
+
+#ifdef _M_ARM64
+
+        Flags2_Offset = 0x418;
+        MitigationFlags_Offset = 0xA90;
+        SignatureLevel_Offset = 0x938;
+
+#elif _WIN64
 
         if (Driver_OsVersion >= DRIVER_WINDOWS_10) {
             if (Driver_OsBuild >= 19013) {
@@ -1671,42 +1675,47 @@ _FX NTSTATUS Token_AssignPrimaryHandle(
 
         }
 
+#endif _WIN64
+
         /*WCHAR msg[256];
 		swprintf(msg, L"BAM: Flags2_Offset=%d MitigationFlags_Offset=%d SignatureLevel_Offset=%d\n", Flags2_Offset, MitigationFlags_Offset, SignatureLevel_Offset);
 		Session_MonitorPut(MONITOR_OTHER, msg, PsGetCurrentProcessId());*/
 
-#endif _WIN64
-
         PtrPrimaryTokenFrozen = (ULONG *)((UCHAR *)ProcessObject + Flags2_Offset);
-        if (Driver_OsBuild >= 15031 && Driver_OsBuild < 16241) {
-            if (*PtrPrimaryTokenFrozen & 0x400) {       // DisableDynamicCode = 0x400
 
-            //Turn off signature Integrity Check
-                *(USHORT *)((UCHAR*)ProcessObject + SignatureLevel_Offset) = 0;
-
-                if (MitigationFlags_Offset) {
-                    //Turn off process level Control Flow Guard and other undocumented security settings 
-                    *(ULONG *)((UCHAR *)ProcessObject + MitigationFlags_Offset) = 0x20;
-                }
-
-            }
-            myProcessInfo.type = 2; //ProcessDynamicCodePolicy
-            myProcessInfo.data = 0; //Turn off DynamicCodePolicy
-
-            ZwSetInformationProcess(ProcessHandle, (PROCESSINFOCLASS)ProcessMitigationPolicy, &myProcessInfo, sizeof(PROCESS_INFO));
-
-        }
-        else if (Driver_OsBuild >= 16241) {
+        if (Driver_OsBuild >= 16241) {
+            
             //Turn off process level Control Flow Guard and other undocumented security settings 
             //really Flag4_Offset in this version of windows 10
-            *(UCHAR *)((UCHAR *)ProcessObject + MitigationFlags_Offset) = 0x00;
+            if(MitigationFlags_Offset)
+                *(UCHAR *)((UCHAR *)ProcessObject + MitigationFlags_Offset) = 0x00;
+
             //Turn off signature Integrity Check
-            *(USHORT *)((UCHAR*)ProcessObject + SignatureLevel_Offset) = 0;
+            if(SignatureLevel_Offset)
+                *(USHORT *)((UCHAR*)ProcessObject + SignatureLevel_Offset) = 0;
+        }
+        else if (Driver_OsBuild >= 15031) {
+
+            if (*PtrPrimaryTokenFrozen & 0x400) { // DisableDynamicCode = 0x400
+                
+                //Turn off process level Control Flow Guard and other undocumented security settings 
+                if (MitigationFlags_Offset) 
+                    *(ULONG *)((UCHAR *)ProcessObject + MitigationFlags_Offset) = 0x20;
+
+                //Turn off signature Integrity Check
+                if (SignatureLevel_Offset) 
+                    *(USHORT*)((UCHAR*)ProcessObject + SignatureLevel_Offset) = 0;
+            }
+        }
+        
+        if (Driver_OsBuild >= 15031) {
+
+            PROCESS_INFO myProcessInfo;
             myProcessInfo.type = 2; //ProcessDynamicCodePolicy
             myProcessInfo.data = 0; //Turn off DynamicCodePolicy
-
             ZwSetInformationProcess(ProcessHandle, (PROCESSINFOCLASS)ProcessMitigationPolicy, &myProcessInfo, sizeof(PROCESS_INFO));
         }
+
         SavePrimaryTokenFrozen = *PtrPrimaryTokenFrozen & 0x8000;
         *PtrPrimaryTokenFrozen &= ~SavePrimaryTokenFrozen;
     }
@@ -2034,7 +2043,7 @@ _FX NTSTATUS Sbie_SepFilterTokenHandler(void *TokenObject,
 #ifdef _WIN64
     //
     // When built with VS2019 on systems with enabled "Core Isolation" (HVCI) we get a BSOD.
-    // This is caused by "Control Flow Guard", we could eider disable it for this file or,
+    // This is caused by "Control Flow Guard", we could either disable it for this file or
     // work around this issue by providing a hand crafted wrapper function that performs the call.
     //
 
@@ -2159,7 +2168,7 @@ _FX void *Token_DuplicateToken(void *TokenObject, PROCESS *proc)
 
     //
     // This just duplicates a token starting with an object instead of a handle
-    // using SepDuplicateToken would be more convinient but its unexported :/
+    // using SepDuplicateToken would be more convenient but it is unexported :/
     //
 
     HANDLE OldTokenHandle;
@@ -2203,6 +2212,25 @@ _FX NTSTATUS SbieCreateToken(PHANDLE TokenHandle, ACCESS_MASK DesiredAccess, POB
     PTOKEN_GROUPS DeviceGroups, PTOKEN_MANDATORY_POLICY MandatoryPolicy,
     PTOKEN_OWNER Owner, PTOKEN_PRIMARY_GROUP PrimaryGroup, PTOKEN_DEFAULT_DACL DefaultDacl, PTOKEN_SOURCE Source)
 {
+#ifdef _M_ARM64
+    if(!Driver_KiServiceInternal)
+        return STATUS_INVALID_SYSTEM_SERVICE;
+    
+    if (ZwCreateTokenEx_num) { // Win 8+
+        return Sbie_CallZwServiceFunction_asm((ULONG_PTR)TokenHandle, (ULONG_PTR)DesiredAccess, (ULONG_PTR)ObjectAttributes,
+            (ULONG_PTR)Type, (ULONG_PTR)AuthenticationId, (ULONG_PTR)ExpirationTime, (ULONG_PTR)User, (ULONG_PTR)Groups, (ULONG_PTR)Privileges,
+            (ULONG_PTR)UserAttributes, (ULONG_PTR)DeviceAttributes, (ULONG_PTR)DeviceGroups, (ULONG_PTR)MandatoryPolicy,
+            (ULONG_PTR)Owner, (ULONG_PTR)PrimaryGroup, (ULONG_PTR)DefaultDacl, (ULONG_PTR)Source, 
+            0, 0,
+            ZwCreateTokenEx_num);
+    }
+    if (ZwCreateToken_num) {
+        NTSTATUS status =  Sbie_CallZwServiceFunction_asm((ULONG_PTR)TokenHandle, (ULONG_PTR)DesiredAccess, (ULONG_PTR)ObjectAttributes,
+            (ULONG_PTR)Type, (ULONG_PTR)AuthenticationId, (ULONG_PTR)ExpirationTime, (ULONG_PTR)User, (ULONG_PTR)Groups, (ULONG_PTR)Privileges,
+            (ULONG_PTR)Owner, (ULONG_PTR)PrimaryGroup, (ULONG_PTR)DefaultDacl, (ULONG_PTR)Source, 
+            0, 0, 0, 0, 0, 0,
+            ZwCreateToken_num);
+#else
     if (ZwCreateTokenEx) { // Win 8+
         return ZwCreateTokenEx(TokenHandle, DesiredAccess, ObjectAttributes,
             Type, AuthenticationId, ExpirationTime, User, Groups, Privileges,
@@ -2213,7 +2241,7 @@ _FX NTSTATUS SbieCreateToken(PHANDLE TokenHandle, ACCESS_MASK DesiredAccess, POB
         NTSTATUS status =  ZwCreateToken(TokenHandle, DesiredAccess, ObjectAttributes,
             Type, AuthenticationId, ExpirationTime, User, Groups, Privileges,
             Owner, PrimaryGroup, DefaultDacl, Source);
-
+#endif
         if (NT_SUCCESS(status)) {
             if(MandatoryPolicy)
                 ZwSetInformationToken(TokenHandle, TokenMandatoryPolicy, MandatoryPolicy, sizeof(TOKEN_MANDATORY_POLICY));
@@ -2250,15 +2278,15 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
     PTOKEN_SOURCE			LocalSource = NULL;
 
     PTOKEN_DEFAULT_DACL		NewDefaultDacl = NULL;
-    ULONG DefaultDacl_Length = 0;
-    PACL  Dacl = NULL;
-    PSID  Sid = NULL;
+    PTOKEN_OWNER            NewOwner = NULL;
+    ULONG                   DefaultDacl_Length = 0;
+    PACL                    NewDacl = NULL;
 
     OBJECT_ATTRIBUTES ObjectAttributes;
     SECURITY_QUALITY_OF_SERVICE SecurityQos;
 
     //
-    // Gether informations from the original token
+    // Get the information from the original token
     //
 
     if (   !NT_SUCCESS(SeQueryInformationToken(TokenObject, TokenStatistics, &LocalStatistics))
@@ -2283,26 +2311,14 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
     // Change the SID
     //
                 
-    // SbieLogin BEGIN
-	if (Conf_Get_Boolean(proc->box->name, L"SandboxieLogon", 0, FALSE))
-	{
-        if (SandboxieLogonSid[0] != 0)
-            Sid = (PSID)SandboxieLogonSid;
-        else {
-            Log_Status_Ex_Process(MSG_1222, 0xA6, status, NULL, proc->box->session_id, proc->pid);
-            goto finish;
-        }
-	}
-	else
-	// SbieLogin END
-    if (Conf_Get_Boolean(proc->box->name, L"AnonymousLogon", 0, TRUE))
+    if (!proc->SandboxieLogonSid && Conf_Get_Boolean(proc->box->name, L"AnonymousLogon", 0, TRUE))
     {
-		Sid = (PSID)AnonymousLogonSid;
+		proc->SandboxieLogonSid = (PSID)AnonymousLogonSid;
     }
 
-	if (Sid != NULL)
+	if (proc->SandboxieLogonSid)
 	{
-		memcpy(LocalUser->User.Sid, Sid, RtlLengthSid(Sid));
+		memcpy(LocalUser->User.Sid, proc->SandboxieLogonSid, RtlLengthSid(proc->SandboxieLogonSid));
 	}
 
     //
@@ -2323,6 +2339,8 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
         NULL,
         NULL
     );
+
+    //LUID AuthenticationId = ANONYMOUS_LOGON_LUID;
 
     status = SbieCreateToken(
         &TokenHandle,
@@ -2350,7 +2368,7 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
     // Retry with new DACLs on error
     //
 
-    if (Sid && status == STATUS_INVALID_OWNER)
+    if (proc->SandboxieLogonSid && status == STATUS_INVALID_OWNER)
     {
         DefaultDacl_Length = LocalDefaultDacl->DefaultDacl->AclSize;
         
@@ -2364,11 +2382,13 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
 
         memcpy(NewDefaultDacl, LocalDefaultDacl, DefaultDacl_Length);
 
-        NewDefaultDacl->DefaultDacl = Dacl = (PACL)((ULONG_PTR)NewDefaultDacl + sizeof(TOKEN_DEFAULT_DACL));
+        NewDefaultDacl->DefaultDacl = NewDacl = (PACL)((ULONG_PTR)NewDefaultDacl + sizeof(TOKEN_DEFAULT_DACL));
         NewDefaultDacl->DefaultDacl->AclSize += 128;
-        Sid = LocalUser->User.Sid;
 
-        RtlAddAccessAllowedAce(Dacl, ACL_REVISION2, GENERIC_ALL, Sid);
+        NewOwner = (PTOKEN_OWNER)ExAllocatePoolWithTag(PagedPool, sizeof(TOKEN_OWNER), tzuk);
+        NewOwner->Owner = LocalUser->User.Sid;
+
+        RtlAddAccessAllowedAce(NewDacl, ACL_REVISION2, GENERIC_ALL, NewOwner->Owner);
 
         status = SbieCreateToken(
             &TokenHandle,
@@ -2386,7 +2406,7 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
             0, //DeviceGroups,
             MandatoryPolicy,
 
-            (PTOKEN_OWNER)&Sid,
+            NewOwner,
             LocalPrimaryGroup,
             NewDefaultDacl,
             LocalSource
@@ -2398,9 +2418,9 @@ _FX void* Token_CreateNew(void* TokenObject, PROCESS* proc)
             goto finish;
         }
 
-        Token_SetHandleDacl(NtCurrentProcess(), Dacl);
-        Token_SetHandleDacl(NtCurrentThread(), Dacl);
-        Token_SetHandleDacl(TokenHandle, Dacl);
+        Token_SetHandleDacl(NtCurrentProcess(), NewDacl);
+        Token_SetHandleDacl(NtCurrentThread(), NewDacl);
+        Token_SetHandleDacl(TokenHandle, NewDacl);
     }
     else if (!NT_SUCCESS(status))
     {
@@ -2467,6 +2487,7 @@ finish:
     if (LocalSource)        ExFreePool((PVOID)LocalSource);
 
     if (NewDefaultDacl)     ExFreePool((PVOID)NewDefaultDacl);
+    if (NewOwner)           ExFreePool((PVOID)NewOwner);
 
 
     //

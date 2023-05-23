@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2022 David Xanatos, xanasoft.com
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -106,8 +106,6 @@ static WCHAR *File_AllocAndInitEnvironment_2(
 static void File_AdjustDrives(
     ULONG path_drive_index, BOOLEAN subst, const WCHAR *path);
 
-static void File_InitSnapshots(void);
-
 
 //---------------------------------------------------------------------------
 // Variables
@@ -123,26 +121,14 @@ static const WCHAR *File_DeviceMap_EnvVar   = ENV_VAR_PFX L"DEVICE_MAP";
 
 
 //---------------------------------------------------------------------------
-// File_InitHandles
-//---------------------------------------------------------------------------
-
-
-_FX BOOLEAN File_InitHandles(void)
-{
-    InitializeCriticalSection(&File_HandleOnClose_CritSec);
-    map_init(&File_HandleOnClose, Dll_Pool);
-
-    return TRUE;
-}
-
-
-//---------------------------------------------------------------------------
 // File_Init
 //---------------------------------------------------------------------------
 
 
 _FX BOOLEAN File_Init(void)
 {
+    HMODULE module = Dll_Ntdll;
+
     void *RtlGetFullPathName_UEx;
     void *GetTempPathW;
     void *NtQueryDirectoryFileEx = NULL;
@@ -158,13 +144,37 @@ _FX BOOLEAN File_Init(void)
 
     File_DriveAddSN = SbieApi_QueryConfBool(NULL, L"UseVolumeSerialNumbers", FALSE);
 
+    File_NoReparse = SbieApi_QueryConfBool(NULL, L"NoPathReparse", FALSE);
+
     if (! File_InitDrives(0xFFFFFFFF))
         return FALSE;
 
+    File_Delete_v2 = SbieApi_QueryConfBool(NULL, L"UseFileDeleteV2", FALSE);
+    if (File_Delete_v2)
+        File_InitDelete_v2();
+
+    // this is here as it requirers file stuff to be set up
+    extern BOOLEAN Key_Delete_v2;
+    BOOLEAN Key_InitDelete_v2();
+    Key_Delete_v2 = SbieApi_QueryConfBool(NULL, L"UseRegDeleteV2", FALSE);
+    if (Key_Delete_v2)
+        Key_InitDelete_v2();
+
+    // this requirers key stuff to be set up
 	if (SbieApi_QueryConfBool(NULL, L"SeparateUserFolders", TRUE)) {
 		if (!File_InitUsers())
 			return FALSE;
 	}
+
+    if (Dll_OsBuild >= 6000) { // needed for File_GetFileName used indirectly by File_InitRecoverFolders
+
+        void *GetFinalPathNameByHandleW =
+            GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
+                "GetFinalPathNameByHandleW");
+        if (GetFinalPathNameByHandleW) {
+            SBIEDLL_HOOK(File_,GetFinalPathNameByHandleW);
+        }
+    }
 
 	File_InitSnapshots();
 
@@ -196,6 +206,7 @@ _FX BOOLEAN File_Init(void)
     SBIEDLL_HOOK(File_,NtWriteFile);
     SBIEDLL_HOOK(File_,NtFsControlFile);
 
+    if (!Dll_CompartmentMode) // else ping does not work
     if (File_IsBlockedNetParam(NULL)) {
         SBIEDLL_HOOK(File_,NtDeviceIoControlFile);
     }
@@ -230,16 +241,6 @@ _FX BOOLEAN File_Init(void)
         }
     }
 
-    if (Dll_OsBuild >= 6000) {
-
-        void *GetFinalPathNameByHandleW =
-            GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
-                "GetFinalPathNameByHandleW");
-        if (GetFinalPathNameByHandleW) {
-            SBIEDLL_HOOK(File_,GetFinalPathNameByHandleW);
-        }
-    }
-
     if (Dll_OsBuild >= 8400 && Dll_IsSystemSid) {
         // see File_GetTempPathW in file file_misc.c
         GetTempPathW = GetProcAddress(Dll_KernelBase, "GetTempPathW");
@@ -252,24 +253,15 @@ _FX BOOLEAN File_Init(void)
     // support for Google Chrome flash plugin process
     //
 
-    if (Dll_ChromeSandbox) {
+    void *GetVolumeInformationW =
+        GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
+            "GetVolumeInformationW");
+    SBIEDLL_HOOK(File_,GetVolumeInformationW);
 
-        void *GetVolumeInformationW =
-            GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
-                "GetVolumeInformationW");
-
-        SBIEDLL_HOOK(File_,GetVolumeInformationW);
-    }
-
-
-    if (Dll_ImageType == DLL_IMAGE_MOZILLA_FIREFOX || Dll_ImageType == DLL_IMAGE_MOZILLA_THUNDERBIRD)
-    {
-        void *WriteProcessMemory =
-            GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
-                "WriteProcessMemory");
-
-        SBIEDLL_HOOK(File_, WriteProcessMemory);
-    }
+    void *WriteProcessMemory =
+        GetProcAddress(Dll_KernelBase ? Dll_KernelBase : Dll_Kernel32,
+            "WriteProcessMemory");
+    SBIEDLL_HOOK(File_, WriteProcessMemory);
 
     return TRUE;
 }
@@ -336,13 +328,6 @@ _FX BOOLEAN File_IsBlockedNetParam(const WCHAR *BoxName)
 // File_GetVolumeSN
 //---------------------------------------------------------------------------
 
-typedef struct _FILE_FS_VOLUME_INFORMATION {
-  LARGE_INTEGER VolumeCreationTime;
-  ULONG         VolumeSerialNumber;
-  ULONG         VolumeLabelLength;
-  BOOLEAN       SupportsObjects;
-  WCHAR         VolumeLabel[1];
-} FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
 
 _FX ULONG File_GetVolumeSN(const FILE_DRIVE *drive)
 {
@@ -408,6 +393,7 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
     ULONG file_drive_len;
     ULONG drive;
     ULONG path_len;
+    //ULONG drive_count;
     WCHAR *path;
     WCHAR error_str[16];
     BOOLEAN CallInitLinks;
@@ -456,6 +442,8 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
 
     InitializeObjectAttributes(
         &objattrs, &objname, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    //drive_count = 0;
 
     for (drive = 0; drive < 26; ++drive) {
 
@@ -517,22 +505,23 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
         status = NtOpenSymbolicLinkObject(
             &handle, SYMBOLIC_LINK_QUERY, &objattrs);
 
-        if (status == STATUS_ACCESS_DENIED) {
+        if (!NT_SUCCESS(status)) {
 
             //
             // if the object is a valid symbolic link but we don't have
-            // acccess rights to open the symbolic link then we ask the
+            // access rights to open the symbolic link then we ask the
             // driver to query the link for us
             //
 
             WCHAR *path2 = Dll_AllocTemp(1024 * sizeof(WCHAR));
             wcscpy(path2, path);
 
-            status = SbieApi_QuerySymbolicLink(path2, 1024 * sizeof(WCHAR));
-            if (NT_SUCCESS(status)) {
+            NTSTATUS status2 = SbieApi_QuerySymbolicLink(path2, 1024 * sizeof(WCHAR));
+            if (NT_SUCCESS(status2)) {
 
                 Dll_Free(path);
                 path = path2;
+                status = status2;
 
                 objname.Length = (USHORT)(wcslen(path) * sizeof(WCHAR));
                 objname.MaximumLength = objname.Length + sizeof(WCHAR);
@@ -544,7 +533,6 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
             } else {
 
                 Dll_Free(path2);
-                status = STATUS_ACCESS_DENIED;
             }
         }
 
@@ -648,6 +636,7 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
                 }
 
                 File_Drives[drive] = file_drive;
+                //drive_count++;
 
                 SbieApi_MonitorPut(MONITOR_DRIVE, path);
             }
@@ -668,6 +657,11 @@ _FX BOOLEAN File_InitDrives(ULONG DriveMask)
             SbieApi_Log(2307, error_str);
         }
     }
+
+    //if (drive_count == 0) {
+    //    Sbie_snwprintf(error_str, 16, L"No Drives Found");
+    //    SbieApi_Log(2307, error_str);
+    //}
 
     //
     // initialize list of volumes mounted to directories rather than drives
@@ -708,16 +702,6 @@ _FX void File_InitLinks(THREAD_DATA *TlsData)
     MOUNTMGR_VOLUME_PATHS *Output2;
     ULONG index1;
     WCHAR save_char;
-
-    //
-    // IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATHS is only available on Windows XP
-    // (and later) where GetVolumePathNamesForVolumeName is also available
-    //
-
-    if (! GetProcAddress(Dll_Kernel32, "GetVolumePathNamesForVolumeNameW")) {
-        File_Windows2000 = TRUE;
-        return;
-    }
 
     //
     // open mount point manager device
@@ -1705,6 +1689,7 @@ _FX void File_GetSetDeviceMap(WCHAR *DeviceMap96)
                 NtCurrentProcess(), ProcessDeviceMap,
                 &info, sizeof(info.Set));
 
+#ifndef _WIN64
             if (status == STATUS_INFO_LENGTH_MISMATCH && Dll_IsWow64) {
 
                 //
@@ -1726,6 +1711,7 @@ _FX void File_GetSetDeviceMap(WCHAR *DeviceMap96)
                     Dll_Free(rpl);
                 }
             }
+#endif
 
             NtClose(info.Set.DirectoryHandle);
 
@@ -1787,58 +1773,4 @@ _FX void File_GetSetDeviceMap(WCHAR *DeviceMap96)
             }
         }
     }
-}
-
-
-//---------------------------------------------------------------------------
-// File_InitSnapshots
-//---------------------------------------------------------------------------
-
-// CRC
-#define CRC_WITH_ADLERTZUK64
-#include "common/crc.c"
-
-_FX void File_InitSnapshots(void)
-{
-	WCHAR ShapshotsIni[MAX_PATH] = { 0 };
-	wcscpy(ShapshotsIni, Dll_BoxFilePath);
-	wcscat(ShapshotsIni, L"\\Snapshots.ini");
-	SbieDll_TranslateNtToDosPath(ShapshotsIni);
-
-	WCHAR Shapshot[16] = { 0 };
-	GetPrivateProfileStringW(L"Current", L"Snapshot", L"", Shapshot, 16, ShapshotsIni);
-
-	if (*Shapshot == 0)
-		return; // not using snapshots
-
-	File_Snapshot = Dll_Alloc(sizeof(FILE_SNAPSHOT));
-	memzero(File_Snapshot, sizeof(FILE_SNAPSHOT));
-	wcscpy(File_Snapshot->ID, Shapshot);
-	File_Snapshot->IDlen = wcslen(Shapshot);
-	FILE_SNAPSHOT* Cur_Snapshot = File_Snapshot;
-	File_Snapshot_Count = 1;
-
-	for (;;)
-	{
-		Cur_Snapshot->ScramKey = CRC32(Cur_Snapshot->ID, Cur_Snapshot->IDlen * sizeof(WCHAR));
-
-		WCHAR ShapshotId[26] = L"Snapshot_";
-		wcscat(ShapshotId, Shapshot);
-		
-		//WCHAR ShapshotName[34] = { 0 };
-		//GetPrivateProfileStringW(ShapshotId, L"Name", L"", ShapshotName, 34, ShapshotsIni);
-		//wcscpy(Cur_Snapshot->Name, ShapshotName);
-
-		GetPrivateProfileStringW(ShapshotId, L"Parent", L"", Shapshot, 16, ShapshotsIni);
-
-		if (*Shapshot == 0)
-			break; // no more snapshots
-
-		Cur_Snapshot->Parent = Dll_Alloc(sizeof(FILE_SNAPSHOT));
-		memzero(Cur_Snapshot->Parent, sizeof(FILE_SNAPSHOT));
-		wcscpy(Cur_Snapshot->Parent->ID, Shapshot);
-		Cur_Snapshot->Parent->IDlen = wcslen(Shapshot);
-		Cur_Snapshot = Cur_Snapshot->Parent;
-		File_Snapshot_Count++;
-	}
 }

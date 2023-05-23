@@ -29,7 +29,9 @@
 #include "ipc.h"
 #include "api.h"
 #include "dll.h"
+#ifndef _M_ARM64
 #include "hook.h"
+#endif
 #include "session.h"
 #include "gui.h"
 #include "token.h"
@@ -72,6 +74,8 @@ static void Process_NotifyImage(
     const UNICODE_STRING *FullImageName,
     HANDLE ProcessId, IMAGE_INFO *ImageInfo);
 
+static NTSTATUS Process_CreateUserProcess(
+    PROCESS *proc, SYSCALL_ENTRY *syscall_entry, ULONG_PTR *user_args);
 
 //---------------------------------------------------------------------------
 
@@ -187,6 +191,14 @@ _FX BOOLEAN Process_Init(void)
         Log_Status(MSG_PROCESS_NOTIFY, 0x22, status);
         return FALSE;
     }
+
+    //
+    // set syscalls handlers that are applicable in Vista and later
+    // Note: NtCreateProcess/NtCreateProcessEx seam not to be used
+    //
+
+    if (! Syscall_Set1("CreateUserProcess", Process_CreateUserProcess))
+        return FALSE;
 
     //
     // set API functions
@@ -543,7 +555,7 @@ _FX void Process_CreateTerminated(HANDLE ProcessId, ULONG SessionId)
     PROCESS *proc;
     KIRQL irql;
 
-    if (SessionId != -1) { // for StartRunAlertDenied, dont log in this case
+    if (SessionId != -1) { // for StartRunAlertDenied, don't log in this case
     
         pid_str.Length = 10 * sizeof(WCHAR);
         pid_str.MaximumLength = pid_str.Length + sizeof(WCHAR);
@@ -657,31 +669,20 @@ _FX PROCESS *Process_Create(
 
     if (image_path) {
 
+        Process_IsSbieImage(image_path, &proc->image_sbie, &proc->is_start_exe);
+
         UNICODE_STRING image_uni;
+        RtlInitUnicodeString(&image_uni, image_path);
+        if (Box_IsBoxedPath(proc->box, file, &image_uni)) {
+
+            proc->image_from_box = TRUE;
+        }
+
         WCHAR *image_name = wcsrchr(image_path, L'\\');
         if (image_name) {
-
-            ULONG len = (ULONG)(image_name - image_path);
-            if ((len == Driver_HomePathNt_Len) &&
-                    (wcsncmp(image_path, Driver_HomePathNt, len) == 0)) {
-
-                proc->image_sbie = TRUE;
-
-                if (_wcsicmp(image_name + 1, START_EXE) == 0) {
-
-                    proc->is_start_exe = TRUE;
-                }
-            }
-
-            RtlInitUnicodeString(&image_uni, image_path);
-            if (Box_IsBoxedPath(proc->box, file, &image_uni)) {
-
-                proc->image_from_box = TRUE;
-            }
-
             ++image_name;
 
-            len = wcslen(image_name);
+            ULONG len = wcslen(image_name);
             if (len) {
 
                 proc->image_name_len = (len + 1) * sizeof(WCHAR);
@@ -729,33 +730,64 @@ _FX PROCESS *Process_Create(
     proc->dont_open_for_boxed = !proc->bAppCompartment && Conf_Get_Boolean(proc->box->name, L"DontOpenForBoxed", 0, TRUE); 
 
     //
+    // Sandboxie attempts to protect per process rules by allowing them only for host binaries
+    // this however has an obvious weakness, as those processes can still load boxed DLL's
+    // with this option we can prevent that
+    //
+
+    proc->protect_host_images = !proc->bAppCompartment && Conf_Get_Boolean(proc->box->name, L"ProtectHostImages", 0, FALSE); 
+
+    //
     // privacy mode requirers Rule Specificity
     //
 
+    proc->use_security_mode = Conf_Get_Boolean(proc->box->name, L"UseSecurityMode", 0, FALSE);
+    proc->is_locked_down = proc->use_security_mode || Conf_Get_Boolean(proc->box->name, L"SysCallLockDown", 0, FALSE);
 #ifdef USE_MATCH_PATH_EX
+    proc->restrict_devices = proc->use_security_mode || Conf_Get_Boolean(proc->box->name, L"RestrictDevices", 0, FALSE);
+
     proc->use_privacy_mode = Conf_Get_Boolean(proc->box->name, L"UsePrivacyMode", 0, FALSE); 
-    proc->use_rule_specificity = proc->use_privacy_mode || Conf_Get_Boolean(proc->box->name, L"UseRuleSpecificity", 0, FALSE); 
+    proc->use_rule_specificity = proc->restrict_devices || proc->use_privacy_mode || Conf_Get_Boolean(proc->box->name, L"UseRuleSpecificity", 0, FALSE); 
 #endif
+    proc->confidential_box = Conf_Get_Boolean(proc->box->name, L"ConfidentialBox", 0, FALSE); 
 
     //
     // check certificate
     //
 
     if (!Driver_Certified && !proc->image_sbie) {
-        if (
-#ifdef USE_MATCH_PATH_EX
-            proc->use_rule_specificity || 
-            proc->use_privacy_mode ||
-#endif
-            proc->bAppCompartment) {
 
-            Log_Msg_Process(MSG_6004, proc->box->name, proc->image_name, box->session_id, proc->pid);
+        const WCHAR* exclusive_setting = NULL;
+        if (proc->use_security_mode)
+            exclusive_setting = L"UseSecurityMode";
+        else if (proc->is_locked_down)
+            exclusive_setting = L"SysCallLockDown";
+        else if (proc->restrict_devices)
+            exclusive_setting = L"RestrictDevices";
+        else
+#ifdef USE_MATCH_PATH_EX
+        if (proc->use_rule_specificity)
+            exclusive_setting = L"UseRuleSpecificity";
+        else if (proc->use_privacy_mode)
+            exclusive_setting = L"UsePrivacyMode";
+        else
+#endif
+        if (proc->bAppCompartment)
+            exclusive_setting = L"NoSecurityIsolation";
+        else if (proc->protect_host_images)
+            exclusive_setting = L"ProtectHostImages";
+        else if (proc->confidential_box)
+            exclusive_setting = L"ConfidentialBox";
+
+        if (exclusive_setting) {
+
+            Log_Msg_Process(MSG_6004, proc->box->name, exclusive_setting, box->session_id, proc->pid);
 
             //Pool_Delete(pool);
             //Process_CreateTerminated(ProcessId, box->session_id);
             //return NULL;
             
-            // allow the process to run for a sort while to allow the features to be avaluated
+            // allow the process to run for a sort while to allow the features to be evaluated
             Process_ScheduleKill(proc, 5*60*1000); // 5 minutes
         }
     }
@@ -905,7 +937,7 @@ _FX void Process_NotifyProcess(
         if (Create) {
 
             //
-            // it is possible to specify the parrent process when calling RtlCreateUserProcess
+            // it is possible to specify the parent process when calling RtlCreateUserProcess
             // this is for example done by the appinfo service running under svchost.exe
             // to start LocalBridge.exe with RuntimeBroker.exe as parent
             // hence we take for our purposes the ID of the process calling RtlCreateUserProcess instead
@@ -992,7 +1024,7 @@ _FX void Process_NotifyProcessEx(
         if (CreateInfo != NULL) {
 
             //
-            // it is possible to specify the parrent process when calling RtlCreateUserProcess
+            // it is possible to specify the parent process when calling RtlCreateUserProcess
             // this is for example done by the appinfo service running under svchost.exe
             // to start LocalBridge.exe with RuntimeBroker.exe as parent
             // hence we take for our purposes the ID of the process calling RtlCreateUserProcess instead
@@ -1027,6 +1059,7 @@ _FX BOOLEAN Process_NotifyProcess_Create(
     const WCHAR *ImagePath;
     BOOLEAN parent_was_start_exe = FALSE;
     BOOLEAN parent_had_rights_dropped = FALSE;
+    BOOLEAN parent_was_image_from_box = FALSE;
     BOOLEAN process_is_forced = FALSE;
     BOOLEAN add_process_to_job = FALSE;
 	BOOLEAN create_terminated = FALSE;
@@ -1086,7 +1119,7 @@ _FX BOOLEAN Process_NotifyProcess_Create(
         // there are a couple of scenarios here
         // a. CallerId == ParentId boring, all's fine
         // b. Caller is sandboxed designated Parent is NOT sandboxed, 
-        //      possible sandbox escape atempt
+        //      possible sandbox escape attempt
         // c. Caller is not sandboxed, designated Parent IS sandboxed, 
         //      service trying to start something on the behalf of a sandboxed process 
         //      eg. seclogon reacting to a runas request 
@@ -1137,6 +1170,9 @@ _FX BOOLEAN Process_NotifyProcess_Create(
                     if (parent_proc->rights_dropped)
                         parent_had_rights_dropped = TRUE;
 
+                    if (parent_proc->image_from_box)
+                        parent_was_image_from_box = TRUE;
+
                 } else
                     create_terminated = TRUE;
 
@@ -1167,20 +1203,20 @@ _FX BOOLEAN Process_NotifyProcess_Create(
 #ifdef DRV_BREAKOUT
         //
         // check if this process is set up as break out program,
-        // it must't be located in a sandboxed for this to work.
+        // it mustn't be located in a sandboxed for this to work.
         //
 
         BOX* breakout_box = NULL;
 
         if (box && Process_IsBreakoutProcess(box, ImagePath)) {
             if(!Driver_Certified)
-                Log_Msg_Process(MSG_6004, box->name, NULL, box->session_id, CallerId);
+                Log_Msg_Process(MSG_6004, box->name, L"BreakoutProcess", box->session_id, CallerId);
             else {
                 UNICODE_STRING image_uni;
                 RtlInitUnicodeString(&image_uni, ImagePath);
                 if (!Box_IsBoxedPath(box, file, &image_uni)) {
 
-                    check_forced_program = TRUE; // the break out process of one box may be the forced process of an otehr
+                    check_forced_program = TRUE; // the breakout process of one box may be the forced process of another
                     breakout_box = box;
                     box = NULL;
                 }
@@ -1292,6 +1328,16 @@ _FX BOOLEAN Process_NotifyProcess_Create(
 		
             create_terminated = TRUE;
 		}
+        else if (!new_proc->image_from_box && new_proc->protect_host_images && parent_was_image_from_box) {
+
+            create_terminated = TRUE;
+
+            Process_SetTerminated(new_proc, 14);
+            new_proc = NULL;
+
+            ExReleaseResourceLite(Process_ListLock);
+            KeLowerIrql(irql);
+        }
         Box_Free(box);
 
         if (new_proc) {
@@ -1316,8 +1362,20 @@ _FX BOOLEAN Process_NotifyProcess_Create(
 
 				WCHAR sParentId[12];
                 _ultow_s((ULONG)ParentId, sParentId, 12, 10);
-                const WCHAR* strings[4] = { new_proc->image_path, new_proc->box->name, sParentId, NULL };
+
+                WCHAR *Buffer;
+                ULONG Length;
+                Process_GetCommandLine(ParentId, &Buffer, &Length);
+
+                const WCHAR* strings[5] = { new_proc->image_path, new_proc->box->name, sParentId, Buffer, NULL };
                 Api_AddMessage(MSG_1399, strings, NULL, new_proc->box->session_id, (ULONG)ProcessId);
+
+                if (Buffer && Length)
+                    Mem_Free(Buffer, Length);
+
+                //
+                //
+                //
 
                 if (! add_process_to_job)
                     new_proc->parent_was_sandboxed = TRUE;
@@ -1337,8 +1395,8 @@ _FX BOOLEAN Process_NotifyProcess_Create(
                 else if (Driver_OsVersion >= DRIVER_WINDOWS_8) {
 
                     //
-                    // on windows 8 and later we can have nested jobs so asigning a 
-                    // boxed job to a process will not interfear with the job assigned by SbieSvc
+                    // on windows 8 and later we can have nested jobs so assigning a 
+                    // boxed job to a process will not interfere with the job assigned by SbieSvc
                     //
 
                     new_proc->can_use_jobs = Conf_Get_Boolean(new_proc->box->name, L"AllowBoxedJobs", 0, FALSE);
@@ -1613,14 +1671,19 @@ _FX void Process_NotifyImage(
 }
 
 
-void Process_SetTerminated(PROCESS *proc, ULONG reason)
+//---------------------------------------------------------------------------
+// Process_SetTerminated
+//---------------------------------------------------------------------------
+
+
+_FX void Process_SetTerminated(PROCESS *proc, ULONG reason)
 {
     //
-    // This function markes a process for termination, this causes File_PreOperation 
+    // This function marks a process for termination, this causes File_PreOperation 
     // and Key_Callback to return STATUS_PROCESS_IS_TERMINATING which prevents 
     // the process form accessing the file system and the registry
     // 
-    // Note: if this is set during process creation the process wont be able to start at all
+    // Note: if this is set during process creation the process won't be able to start at all
     //
 
     if (!proc->terminated)
@@ -1629,3 +1692,37 @@ void Process_SetTerminated(PROCESS *proc, ULONG reason)
         proc->reason = reason;
     }
 }
+
+
+//---------------------------------------------------------------------------
+// Process_CreateUserProcess
+//---------------------------------------------------------------------------
+
+
+_FX NTSTATUS Process_CreateUserProcess(
+    PROCESS *proc, SYSCALL_ENTRY *syscall_entry, ULONG_PTR *user_args)
+{
+    THREAD* thrd = NULL;
+    KIRQL irql;
+
+    if (proc->protect_host_images) 
+    {
+        KeRaiseIrql(APC_LEVEL, &irql);
+        ExAcquireResourceExclusiveLite(proc->threads_lock, TRUE);
+		
+		thrd = Thread_GetOrCreate(proc, NULL, TRUE);
+        if (thrd)
+            thrd->create_process_in_progress = TRUE;
+
+        ExReleaseResourceLite(proc->threads_lock);
+        KeLowerIrql(irql);	
+    }
+
+    NTSTATUS status = Syscall_Invoke(syscall_entry, user_args);
+
+    if (thrd)
+        thrd->create_process_in_progress = FALSE;
+
+    return status;
+}
+

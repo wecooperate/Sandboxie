@@ -11,12 +11,14 @@ bool CPopUpWindow__DarkMode = false;
 
 CPopUpWindow::CPopUpWindow(QWidget* parent) : QMainWindow(parent)
 {
+	m_HideAllMessages = false;
+
 	Qt::WindowFlags flags = windowFlags();
 	flags |= Qt::CustomizeWindowHint;
 	//flags &= ~Qt::WindowContextHelpButtonHint;
 	//flags &= ~Qt::WindowSystemMenuHint;
-	flags &= ~Qt::WindowMinMaxButtonsHint;
-	//flags &= ~Qt::WindowMinimizeButtonHint;
+	//flags &= ~Qt::WindowMinMaxButtonsHint;
+	flags &= ~Qt::WindowMaximizeButtonHint;
 	//flags &= ~Qt::WindowCloseButtonHint;
 	setWindowFlags(flags);
 
@@ -26,7 +28,7 @@ CPopUpWindow::CPopUpWindow(QWidget* parent) : QMainWindow(parent)
 	ui.setupUi(centralWidget);
 	this->setCentralWidget(centralWidget);
 
-	setWindowFlags(Qt::Tool);
+	//setWindowFlags(Qt::Tool);
 
 	ui.table->verticalHeader()->hide();
 	ui.table->horizontalHeader()->hide();
@@ -185,7 +187,15 @@ void CPopUpWindow::ReloadHiddenMessages()
 	QStringList HiddenMessages = theAPI->GetUserSettings()->GetTextList("SbieCtrl_HideMessage", true);
 	foreach(const QString& HiddenMessage, HiddenMessages)
 	{
+		if (HiddenMessage == "*") {
+			m_HideAllMessages = true;
+			m_HiddenMessages.clear();
+			break;
+		}
+
 		StrPair CodeDetail = Split2(HiddenMessage, ",");
+		if (CodeDetail.first.left(4) == "SBIE" || CodeDetail.first.left(4) == "SBOX")
+			CodeDetail.first = CodeDetail.first.mid(4);
 		m_HiddenMessages.insert(CodeDetail.first.toInt(), CodeDetail.second);
 	}
 }
@@ -206,7 +216,7 @@ void CPopUpWindow::OnHideMessage()
 
 	m_HiddenMessages.insert(pEntry->GetMsgId(), pEntry->GetMsgData(1));
 	if (theAPI->GetUserSettings() != NULL)
-		theAPI->GetUserSettings()->AppendText("SbieCtrl_HideMessage", QString("%1, %2").arg(pEntry->GetMsgId()).arg(pEntry->GetMsgData(1)));
+		theAPI->GetUserSettings()->AppendText("SbieCtrl_HideMessage", QString("%1,%2").arg(pEntry->GetMsgId()).arg(pEntry->GetMsgData(1)));
 
 	for (int i = 0; i < ui.table->rowCount(); i++)
 	{
@@ -221,9 +231,16 @@ void CPopUpWindow::OnHideMessage()
 
 bool CPopUpWindow::IsMessageHidden(quint32 MsgCode, const QStringList& MsgData)
 {
+	if (m_HideAllMessages)
+		return true;
+
 	foreach(const QString& Details, m_HiddenMessages.values(MsgCode & 0xFFFF))
 	{
-		if(Details.isEmpty() || (MsgData.size() >= 2 && Details.compare(MsgData[1]) == 0))
+		if(Details.isEmpty())
+			return true;
+
+		QRegularExpression exp("^" + QRegularExpression::escape(Details).replace("\\*",".*").replace("\\?","."));
+		if(MsgData.size() >= 2 && exp.match(MsgData[1]).hasMatch())
 			return true;
 	}
 	return false;
@@ -380,7 +397,7 @@ void CPopUpWindow::OnRecoverFile(int Action)
 	QList<QPair<QString, QString>> FileList;
 	FileList.append(qMakePair(pEntry->m_BoxPath, RecoveryFolder + "\\" + FileName));
 
-	SB_PROGRESS Status = theGUI->RecoverFiles(FileList, Action);
+	SB_PROGRESS Status = theGUI->RecoverFiles(pEntry->m_BoxName, FileList, theGUI, Action);
 	if (Status.GetStatus() == OP_ASYNC)
 		theGUI->AddAsyncOp(Status.GetValue());
 		

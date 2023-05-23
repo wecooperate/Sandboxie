@@ -24,9 +24,9 @@
 
 #include "common/win32_ntddk.h"
 #include "core/dll/sbiedll.h"
+#include "common/defines.h"
 #include "core/svc/SbieIniWire.h"
 #include "common/my_version.h"
-#include "common/defines.h"
 #include "msgs/msgs.h"
 
 
@@ -49,9 +49,11 @@
 
 void List_Process_Ids(void);
 int Terminate_All_Processes(BOOL all_boxes);
+int Delete_All_Sandboxes();
 
 extern WCHAR *DoRunDialog(HINSTANCE hInstance);
 extern WCHAR *DoBoxDialog(void);
+extern bool DoAboutDialog(bool bReminder = false);
 extern BOOL ResolveDirectory(WCHAR *PathW);
 extern WCHAR *DoStartMenu(void);
 extern BOOL WriteStartMenuResult(const WCHAR *MapName, const WCHAR *Command);
@@ -74,12 +76,12 @@ extern "C" {
 //---------------------------------------------------------------------------
 
 
-WCHAR BoxName[34];
+WCHAR BoxName[BOXNAME_COUNT];
 
 PWSTR ChildCmdLine = NULL;
 BOOL run_mail_agent = FALSE;
 BOOL display_run_dialog = FALSE;
-BOOL display_start_menu = FALSE;
+int display_start_menu = 0;
 BOOL execute_auto_run = FALSE;
 BOOL execute_open_with = FALSE;
 BOOL run_elevated_2 = FALSE;
@@ -245,11 +247,17 @@ BOOL Validate_Box_Name(void)
 
     if (! disable_force_on_this_program) {
 
+        if (display_start_menu != 2) {
+            if (!DoAboutDialog(true))
+                return die(EXIT_FAILURE);
+        }
+
         if (_wcsicmp(BoxName, L"__ask__") == 0 ||
             _wcsicmp(BoxName, L"current") == 0) {
 
             if (auto_select_default_box) {
-                wcscpy(BoxName, L"DefaultBox");
+                if(!NT_SUCCESS(SbieApi_QueryConfAsIs(L"GlobalSettings", L"DefaultBox", 0, BoxName, sizeof(BoxName))) || *BoxName == L'\0')
+                    wcscpy(BoxName, L"DefaultBox");
                 if (SbieApi_IsBoxEnabled(BoxName) != STATUS_SUCCESS)
                     auto_select_default_box = FALSE;
             }
@@ -389,10 +397,12 @@ BOOL Parse_Command_Line(void)
     static const WCHAR *mail_agent        = L"mail_agent";
     static const WCHAR *run_dialog        = L"run_dialog";
     static const WCHAR *start_menu        = L"start_menu";
+    static const WCHAR *about_dialog      = L"about_dialog";
     static const WCHAR *open_with         = L"open_with";
     static const WCHAR *auto_run          = L"auto_run";
     static const WCHAR *mount_hive        = L"mount_hive";
     static const WCHAR *delete_sandbox    = L"delete_sandbox";
+    static const WCHAR *delete_all_sandboxes = L"delete_all_sandboxes";
     static const WCHAR *_logoff           = L"_logoff";
     static const WCHAR *_silent           = L"_silent";
     static const WCHAR *_phase            = L"_phase";
@@ -409,12 +419,25 @@ BOOL Parse_Command_Line(void)
     //
     //
 
-    if (_wcsicmp(cmd, L"run_sbie_ctrl") == 0) {
+    if (_wcsicmp(cmd, L"run_sbie_ctrl") == 0 || _wcsnicmp(cmd, L"open_agent", 10) == 0) {
 
-        MSG_HEADER req, *rpl = NULL;
+        union {
+            MSG_HEADER req;
+            UCHAR buffer[128];
+        };
+        MSG_HEADER *rpl = NULL;
         if (CallSbieSvcGetUser()) {
             req.length = sizeof(req);
             req.msgid  = MSGID_SBIE_INI_RUN_SBIE_CTRL;
+
+            if (_wcsnicmp(cmd, L"open_agent:", 11) == 0) {
+                cmd += 11;
+                tmp = Eat_String(cmd);
+                ULONG len = ULONG(tmp - cmd) * sizeof(WCHAR);
+                memcpy((WCHAR*)&buffer[req.length], cmd, len);
+                req.length += len;
+            }
+
             rpl = SbieDll_CallServer(&req);
         }
         ExitProcess((rpl && rpl->status == 0) ? EXIT_SUCCESS : EXIT_FAILURE);
@@ -468,7 +491,7 @@ BOOL Parse_Command_Line(void)
                 }
             }
 
-            if (tmp == cmd || (cmd - tmp > 32)) {
+            if (tmp == cmd || (cmd - tmp > (BOXNAME_COUNT - 2))) {
 
                 if (run_silent)
                     ExitProcess(ERROR_UNKNOWN_PROPERTY);
@@ -727,6 +750,9 @@ BOOL Parse_Command_Line(void)
 
     } else if (wcsncmp(cmd, start_menu, wcslen(start_menu)) == 0) {
 
+        WCHAR *colon = cmd + wcslen(start_menu);
+        display_start_menu = *colon == L':' ? 2 : 1; // 1 run from start menu, 2 create shortcut
+
         if (! SbieApi_QueryProcessInfo(
                         (HANDLE)(ULONG_PTR)GetCurrentProcessId(), 0)) {
             // this is the instance of Start.exe outside the sandbox
@@ -738,7 +764,6 @@ BOOL Parse_Command_Line(void)
 
             // this is the instance of Start.exe in the sandbox so we
             // need to parse the start_menu command line
-            WCHAR *colon = cmd + wcslen(start_menu);
             if (*colon == L':') {
                 ULONG name_len = wcslen(colon + 1);
                 StartMenuSectionName =
@@ -754,8 +779,6 @@ BOOL Parse_Command_Line(void)
                 }
             }
         }
-
-        display_start_menu = TRUE;
 
         return TRUE;
 
@@ -779,6 +802,14 @@ BOOL Parse_Command_Line(void)
         wcscpy(ChildCmdLine, cmd + len);
 
         return TRUE;
+
+    // show about dialog
+
+    } else if (wcsncmp(cmd, about_dialog, wcslen(about_dialog)) == 0) {
+
+        DoAboutDialog();
+
+        return FALSE;
 
     // run auto start entries
 
@@ -851,6 +882,12 @@ BOOL Parse_Command_Line(void)
         // does not return
 
         return TRUE;
+
+    // if rest is exactly "delete_all_sandboxes", do that processing
+
+    } else if (wcsncmp(cmd, delete_all_sandboxes, wcslen(delete_all_sandboxes)) == 0) {
+
+        return die(Delete_All_Sandboxes());
 
     //
     // if rest is exactly "disable_force" or "disable_force_off"
@@ -1027,6 +1064,14 @@ int Program_Start(void)
         expanded = MyHeapAlloc(8192 * sizeof(WCHAR));
         ExpandEnvironmentStrings(cmdline, expanded, 8192);
 
+        //
+        // When the service process has a manifest which requires elevated privileges,
+        // CreateProcess will fail if we did not start with a elevated token.
+        // To fix this issue we always fake being elevated when starting a service.
+        //
+
+        SbieDll_SetFakeAdmin(TRUE);
+
 		//
 		// If the command contains a space but no ", try to fix it
 		//
@@ -1099,8 +1144,8 @@ int Program_Start(void)
         //
 
         //
-        // note: this workaround does nto work the path is still blocked 
-        // and we still get problems, hence now the deriver has an excemption for start.exe
+        // note: this workaround does not work the path is still blocked 
+        // and we still get problems, hence now the derive has an exemption for start.exe
         //
 
         //LoadLibrary(L"apphelp.dll");
@@ -1247,7 +1292,7 @@ int Program_Start(void)
         SetLastError(err);
         Show_Error(errmsg);
 
-        keep_alive = FALSE; // disable keep alive when the process cant be started in the first place
+        keep_alive = FALSE; // disable keep alive when the process can't be started in the first place
             
         return EXIT_FAILURE;
 
@@ -1314,7 +1359,7 @@ void StartAutoRunKey(LPCWSTR lpKey)
 	UNICODE_STRING Data;
 	NTSTATUS Status;
 
-    // Get the native unhooked fucntion in order to enumerate only the sandboxed entries
+    // Get the native unhooked function in order to enumerate only the sandboxed entries
     P_NtOpenKey __sys_NtOpenKey = (P_NtOpenKey)SbieDll_GetSysFunction(L"NtOpenKey");
     P_NtEnumerateValueKey __sys_NtEnumerateValueKey = (P_NtEnumerateValueKey)SbieDll_GetSysFunction(L"NtEnumerateValueKey");
 
@@ -1413,7 +1458,7 @@ void StartAutoAutoFolder(LPCWSTR lpPath)
 	//HANDLE Event;
     PFILE_ID_BOTH_DIR_INFORMATION DirInformation;
 
-    // Get the native unhooked fucntion in order to enumerate only the sandboxed entries
+    // Get the native unhooked function in order to enumerate only the sandboxed entries
     P_NtCreateFile __sys_NtCreateFile = (P_NtCreateFile)SbieDll_GetSysFunction(L"NtCreateFile");
     P_NtQueryDirectoryFile __sys_NtQueryDirectoryFile = (P_NtQueryDirectoryFile)SbieDll_GetSysFunction(L"NtQueryDirectoryFile");
 	
@@ -1625,7 +1670,8 @@ int __stdcall WinMainCRTStartup(
     Sandboxie_Start_Title = SbieDll_FormatMessage0(MSG_3101);
     SbieDll_GetLanguage(&layout_rtl);
 
-    wcscpy(BoxName, L"DefaultBox");
+    if(!NT_SUCCESS(SbieApi_QueryConfAsIs(L"GlobalSettings", L"DefaultBox", 0, BoxName, sizeof(BoxName))) || *BoxName == L'\0')
+        wcscpy(BoxName, L"DefaultBox");
 
     Token_Elevation_Type = SbieDll_GetTokenElevationType();
 
@@ -1764,8 +1810,8 @@ int __stdcall WinMainCRTStartup(
         rc = Program_Start();
 
         // keep the process running unless it gracefully terminates
-        if (keep_alive && rc != EXIT_SUCCESS && retry++ < 5) { // after to many initialization failures abbort
-            if (::GetTickCount() - start >= 5000) // if the process run for less than 5 seconts considder it a failure to initialize
+        if (keep_alive && rc != EXIT_SUCCESS && retry++ < 5) { // after to many initialization failures abort
+            if (::GetTickCount() - start >= 5000) // if the process run for less than 5 seconds consider it a failure to initialize
                 retry = 0; // reset failure counter on success ful start
             goto run_program;
         }

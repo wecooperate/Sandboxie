@@ -44,13 +44,13 @@
 bool ServiceServer::CanCallerDoElevation(
         HANDLE idProcess, const WCHAR *ServiceName, ULONG *pSessionId)
 {
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
     WCHAR exename[99];
 
     if (0 != SbieApi_QueryProcess(idProcess, boxname, exename, NULL, pSessionId))
         return false;
 
-    bool DropRights = CheckDropRights(boxname);
+    bool DropRights = CheckDropRights(boxname, exename);
 
     if (ServiceName) {
 
@@ -72,7 +72,7 @@ bool ServiceServer::CanCallerDoElevation(
             // not be started with a system token allow it to be start
             //
 
-            if (DropRights && SbieApi_QueryConfBool(boxname, L"FakeAdminRights", FALSE))
+            if (DropRights && SbieDll_GetSettingsForName_bool(boxname, exename, L"FakeAdminRights", FALSE))
                 DropRights = false;
 
             // 
@@ -108,8 +108,8 @@ bool ServiceServer::CanCallerDoElevation(
 
 bool ServiceServer::CanAccessSCM(HANDLE idProcess)
 {
-	WCHAR boxname[48] = { 0 };
-	WCHAR exename[128] = { 0 };
+	WCHAR boxname[BOXNAME_COUNT] = { 0 };
+	WCHAR exename[99] = { 0 };
 	SbieApi_QueryProcess(idProcess, boxname, exename, NULL, NULL); // if this fail we take the global config if present
 	if (SbieApi_QueryConfBool(boxname, L"UnrestrictedSCM", FALSE))
 		return true;
@@ -177,7 +177,7 @@ void ServiceServer::ReportError2218(HANDLE idProcess, ULONG errlvl)
 {
     ULONG LastError = GetLastError();
 
-    WCHAR boxname[48];
+    WCHAR boxname[BOXNAME_COUNT];
     WCHAR imagename[99];
     ULONG session_id;
 
@@ -293,7 +293,7 @@ int ServiceServer::RunServiceAsSystem(const WCHAR* svcname, const WCHAR* boxname
     if (svcname && _wcsicmp(svcname, L"MSIServer") == 0 && SbieApi_QueryConfBool(boxname, L"MsiInstallerExemptions", FALSE))
         return 2;
 
-    // legacy behavioure option
+    // legacy behaviour option
     if (SbieApi_QueryConfBool(boxname, L"RunServicesAsSystem", FALSE)) 
         return 1;
     
@@ -327,7 +327,7 @@ ULONG ServiceServer::RunHandler2(
     BOOL  ok = TRUE;
     BOOL  asSys;
 
-    WCHAR boxname[48] = { 0 };
+    WCHAR boxname[BOXNAME_COUNT] = { 0 };
 
     SbieApi_QueryProcess(idProcess, boxname, NULL, NULL, NULL);
 
@@ -382,7 +382,7 @@ ULONG ServiceServer::RunHandler2(
                 hNewToken, TokenSessionId, &idSession, sizeof(ULONG));
     }
 
-    if (ok && asSys) { // we don't need to adapt Dacl when we run this service as a regular user
+    if (ok && asSys) { // we don't need to adapt DACL when we run this service as a regular user
         errlvl = 0x26;
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (ULONG)(ULONG_PTR)idProcess);
         if (!hProcess)
@@ -702,7 +702,7 @@ void ServiceServer::RunUacSlave2(ULONG_PTR *ThreadArgs)
 
     HANDLE idProcess = (HANDLE)ThreadArgs[0];
 
-    WCHAR BoxName[48];
+    WCHAR BoxName[BOXNAME_COUNT];
     if (0 != SbieApi_QueryProcess(idProcess, BoxName, NULL, NULL, NULL))
         return;
 
@@ -1158,7 +1158,7 @@ void ServiceServer::RunUacSlave3(
 
     if (ok) {
 
-        WCHAR BoxName[48];
+        WCHAR BoxName[BOXNAME_COUNT];
         SbieApi_QueryProcess((HANDLE)(ULONG_PTR)GetCurrentProcessId(),
                              BoxName, NULL, NULL, NULL);
         if (BoxName[0]){

@@ -77,6 +77,8 @@ ProtectCall4            PROC
 ProtectCall4            ENDP
 
 
+ifndef _M_ARM64EC
+
 ;----------------------------------------------------------------------------
 ; RpcRt_Ndr64AsyncClientCall
 ;----------------------------------------------------------------------------
@@ -97,7 +99,7 @@ RpcRt_Ndr64AsyncClientCall PROC
 ;;    xor rcx,rcx     ; clear pProxyInfo
 ;;    xor rdx,rdx     ; clear nProcNum
 ;;    xor r8,r8       ; clear pReturnValue
-;	mov r8,[rsp + 8+(4*8)]			; return poitner
+;	mov r8,[rsp + 8+(4*8)]			; return pointer
     lea r9,[rsp + 8+(4*8) + 4*8]    ; setup Args -> SECURE_UAC_ARGS
     call RpcRt_Ndr64AsyncClientCall_x64
         test al,al
@@ -126,6 +128,8 @@ WeHandleElevation:
 RpcRt_Ndr64AsyncClientCall ENDP
 
 
+endif
+
 ;----------------------------------------------------------------------------
 ; Ldr_Inject_Entry64
 ;----------------------------------------------------------------------------
@@ -135,15 +139,10 @@ EXTERN Ldr_Inject_Entry           : PROC
 
 Ldr_Inject_Entry64      PROC
 
-        ;
-        ; Normally we would start with sub rsp,8+(4*8) but in this case
-        ; we know the caller has not aligned the stack correctly
-        ;
-
-    sub rsp,8+8+(4*8)
-    lea rcx,[rsp+8+8+(4*8)]     ; setup pRetAddr parameter
+    sub rsp,8+(4*8)
     call Ldr_Inject_Entry
-    add rsp,8+8+(4*8)
+    mov rdx, rax
+    add rsp,8+(4*8)
     
     ;
     ; clear the stack of any leftovers from Ldr_Inject_Entry.
@@ -151,13 +150,14 @@ Ldr_Inject_Entry64      PROC
     ; assumes the stack is zero
     ;
     
+    ; $Workaround$ - 3rd party fix
     lea rdi,[rsp-200h]
     mov rcx,200h/8
     xor rax,rax
     cld
     rep stosq
     
-    ret
+    jmp rdx
     
 Ldr_Inject_Entry64      ENDP
 
@@ -192,6 +192,8 @@ l02:    ret
 Gui_FixupCallbackPointers   ENDP
 
 
+ifndef _M_ARM64EC
+
 ;----------------------------------------------------------------------------
 ; Secure_NdrAsyncClientCall
 ;----------------------------------------------------------------------------
@@ -211,7 +213,7 @@ RpcRt_NdrAsyncClientCall PROC
 
 ;;    xor rcx,rcx     ; clear pStubDescriptor
 ;;    xor rdx,rdx     ; clear pFormat
-;	mov r8,[rsp + 8+(4*8)]			; return poitner
+;	mov r8,[rsp + 8+(4*8)]			; return pointer
     lea r8,[rsp + 8+(4*8) + 3*8]    ; Args
     call RpcRt_NdrAsyncClientCall_x64
     test al,al
@@ -231,7 +233,7 @@ CancelCallA:
 ;;;    xor rcx,rcx     ; clear pProxyInfo
 ;;;    xor rdx,rdx     ; clear nProcNum
 ;;;    xor r8,r8       ; clear pReturnValue
-;;	 mov r8,[rsp + 8+(4*8)]			 ; return poitner
+;;	 mov r8,[rsp + 8+(4*8)]			 ; return pointer
 ;    lea r8,[rsp + 8+(4*8) + 3*8]    ; Args
 ;    call RpcRt_NdrAsyncClientCall_...
 
@@ -260,7 +262,7 @@ RpcRt_NdrClientCall2 PROC
 
 ;;    xor rcx,rcx     ; clear pStubDescriptor
 ;;    xor rdx,rdx     ; clear pFormat
-;	mov r8,[rsp + 8+(4*8)]			; return poitner
+;	mov r8,[rsp + 8+(4*8)]			; return pointer
     lea r8,[rsp + 8+(4*8) + 3*8]    ; Args
     call RpcRt_NdrClientCall2_x64
     test al,al
@@ -280,7 +282,7 @@ CancelCall2:
 ;;;    xor rcx,rcx     ; clear pProxyInfo
 ;;;    xor rdx,rdx     ; clear nProcNum
 ;;;    xor r8,r8       ; clear pReturnValue
-;;	 mov r8,[rsp + 8+(4*8)]			 ; return poitner
+;;	 mov r8,[rsp + 8+(4*8)]			 ; return pointer
 ;    lea r8,[rsp + 8+(4*8) + 3*8]    ; Args
 ;    call RpcRt_NdrClientCall2_...
 
@@ -311,7 +313,7 @@ RpcRt_NdrClientCall3 PROC
 ;;    xor rcx,rcx     ; clear pProxyInfo
 ;;    xor rdx,rdx     ; clear nProcNum
 ;;    xor r8,r8       ; clear pReturnValue
-;	mov r8,[rsp + 8+(4*8)]			; return poitner
+;	mov r8,[rsp + 8+(4*8)]			; return pointer
     lea r9,[rsp + 8+(4*8) + 4*8]    ; Args
     call RpcRt_NdrClientCall3_x64
     test al,al
@@ -331,7 +333,7 @@ CancelCall3:
 ;;;    xor rcx,rcx     ; clear pProxyInfo
 ;;;    xor rdx,rdx     ; clear nProcNum
 ;;;    xor r8,r8       ; clear pReturnValue
-;;	 mov r8,[rsp + 8+(4*8)]			 ; return poitner
+;;	 mov r8,[rsp + 8+(4*8)]			 ; return pointer
 ;    lea r9,[rsp + 8+(4*8) + 4*8]    ; Args
 ;    call RpcRt_NdrClientCall3_...
 
@@ -340,4 +342,102 @@ CancelCall3:
 
 RpcRt_NdrClientCall3 ENDP
 
+endif
 
+
+
+;----------------------------------------------------------------------------
+; InstrumentationCallback
+;----------------------------------------------------------------------------
+
+ifndef _M_ARM64EC
+
+extern InstrumentationCallback:near
+
+EXTERNDEF __imp_RtlCaptureContext:QWORD
+
+InstrumentationCallbackAsm proc
+
+	push	rsp							; Back-up RSP, R10, and RAX to preserve them
+	push	r10
+	push	rax
+
+	mov		rax, 1						; Set RAX to 1 for comparison
+	cmp		gs:[2ech], rax				; See if the recursion flag (Win10 TEB InstrumentationCallbackDisabled) has been set
+	je		resume						; Jump and restore the registers if it has and resume
+
+	pop		rax
+	pop		r10
+	pop		rsp
+
+	mov     gs:[2e0h], rsp				; Win10 TEB InstrumentationCallbackPreviousSp
+	mov     gs:[2d8h], r10				; Win10 TEB InstrumentationCallbackPreviousPc
+
+	mov     r10, rcx					; Save original RCX
+	sub     rsp, 4d0h					; Alloc stack space for CONTEXT structure
+	and     rsp, -10h					; RSP must be 16 byte aligned before calls
+	mov     rcx, rsp
+	;mov		rdx, 0h
+	sub		rsp, 20h
+	call    __imp_RtlCaptureContext		; Save the current register state. RtlCaptureContext does not require shadow space
+	mov		r8, [rcx+78h]				; The value of RAX from the CONTEXT object stored at RSP
+	mov		rdx, gs:[2d8h]				; The saved RIP address
+	sub		rsp, 20h
+	call    InstrumentationCallback		; Call main instrumentation routine
+    int     3                           ; it should not return
+
+resume:
+	pop		rax
+	pop		r10
+	pop		rsp
+
+	jmp		r10
+
+
+if 0
+
+	;cmp eax, 0			; STATUS_SUCCESS
+	;jne ReturnToCaller
+
+	push rax ; return value
+	push rcx
+	push rbx
+	push rbp
+	push rdi
+	push rsi
+	push rsp
+	push r10
+	push r11
+	push r12
+	push r13
+	push r14
+	push r15
+
+	sub rsp, 20h
+	mov rcx, r10
+	mov rdx, rax
+	call InstrumentationCallback
+	add rsp, 20h
+
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop r11
+	pop r10
+	pop rsp
+	pop rsi
+	pop rdi
+	pop rbp
+	pop rbx
+	pop rcx
+	add rsp, 8 ; preserve new rax
+
+;ReturnToCaller:
+	jmp r10
+
+endif
+
+InstrumentationCallbackAsm endp
+
+endif

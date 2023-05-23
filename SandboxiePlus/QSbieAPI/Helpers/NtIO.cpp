@@ -9,13 +9,16 @@ typedef long NTSTATUS;
 
 #include "NtIO.h"
 
-bool NtIo_WaitForFolder(POBJECT_ATTRIBUTES objattrs, int seconds)
+bool NtIo_WaitForFolder(POBJECT_ATTRIBUTES objattrs, int seconds, bool (*cb)(const WCHAR* info, void* param), void* param)
 {
 	NTSTATUS status = STATUS_SUCCESS;
 	IO_STATUS_BLOCK IoStatusBlock;
 
 	for (int retries = 0; retries < seconds * 2; retries++)
 	{
+		if (cb && !cb(objattrs->ObjectName->Buffer, param))
+			return false;
+
 		HANDLE handle = NULL;
 		status = NtCreateFile(&handle, DELETE | SYNCHRONIZE, objattrs, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL,
 			0, FILE_OPEN, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
@@ -40,19 +43,16 @@ NTSTATUS NtIo_RemoveProblematicAttributes(POBJECT_ATTRIBUTES objattrs)
 		objattrs, &IoStatusBlock, NULL, 0, 0, FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
 	if (NT_SUCCESS(status))
 	{
-		union {
-			FILE_BASIC_INFORMATION info;
-			WCHAR space[128];
-		} u;
+		FILE_BASIC_INFORMATION info;
 
-		status = NtQueryInformationFile(handle, &IoStatusBlock, &u.info, sizeof(u), FileBasicInformation);
+		status = NtQueryInformationFile(handle, &IoStatusBlock, &info, sizeof(info), FileBasicInformation);
 		if (NT_SUCCESS(status))
 		{
-			u.info.FileAttributes &= ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
-			if (u.info.FileAttributes == 0 || u.info.FileAttributes == FILE_ATTRIBUTE_DIRECTORY)
-				u.info.FileAttributes |= FILE_ATTRIBUTE_NORMAL;
+			info.FileAttributes &= ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+			if (info.FileAttributes == 0 || info.FileAttributes == FILE_ATTRIBUTE_DIRECTORY)
+				info.FileAttributes |= FILE_ATTRIBUTE_NORMAL;
 
-			status = NtSetInformationFile(handle, &IoStatusBlock, &u.info, sizeof(u), FileBasicInformation);
+			status = NtSetInformationFile(handle, &IoStatusBlock, &info, sizeof(info), FileBasicInformation);
 		}
 
 		NtClose(handle);
@@ -82,10 +82,15 @@ NTSTATUS NtIo_RemoveJunction(POBJECT_ATTRIBUTES objattrs)
 	status = NtCreateFile(&Handle, GENERIC_WRITE | DELETE, objattrs, &Iosb, 0, 0, FILE_SHARE_READ, FILE_OPEN, FILE_FLAG_OPEN_REPARSE_POINT, 0, 0); // 0x40100080, , , , , 0x00204020
 	if (NT_SUCCESS(status))
 	{
-		REPARSE_DATA_MOUNT_POINT ReparseData = { 0 };
-		ReparseData.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
-		ReparseData.ReparseDataLength = 0;
-		status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_DELETE_REPARSE_POINT, &ReparseData, REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0);
+		REPARSE_DATA_MOUNT_POINT ReparseBuffer = { 0 };
+		status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_REPARSE_POINT, NULL, 0, &ReparseBuffer, sizeof(ReparseBuffer));
+		if (NT_SUCCESS(status))
+		{
+			REPARSE_GUID_DATA_BUFFER ReparseData = { 0 };
+			ReparseData.ReparseTag = ReparseBuffer.ReparseTag;
+			ReparseData.ReparseDataLength = 0;
+			status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_DELETE_REPARSE_POINT, &ReparseData, REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0);
+		}
 
 		NtClose(Handle);
 	}
@@ -93,10 +98,13 @@ NTSTATUS NtIo_RemoveJunction(POBJECT_ATTRIBUTES objattrs)
 	return status;
 }
 
-NTSTATUS NtIo_DeleteFolderRecursivelyImpl(POBJECT_ATTRIBUTES objattrs)
+NTSTATUS NtIo_DeleteFolderRecursivelyImpl(POBJECT_ATTRIBUTES objattrs, bool (*cb)(const WCHAR* info, void* param), void* param)
 {
 	NTSTATUS status = STATUS_SUCCESS;
 	IO_STATUS_BLOCK Iosb;
+
+	if (cb && !cb(objattrs->ObjectName->Buffer, param))
+		return STATUS_CANCELLED;
 
 	HANDLE Handle;
 	status = NtCreateFile(&Handle, GENERIC_READ, objattrs, &Iosb,
@@ -106,7 +114,7 @@ NTSTATUS NtIo_DeleteFolderRecursivelyImpl(POBJECT_ATTRIBUTES objattrs)
 
 	for ( ; status == STATUS_SUCCESS; )
 	{
-		wstring FileName;
+		std::wstring FileName;
 		ULONG FileAttributes;
 
 		PFILE_BOTH_DIRECTORY_INFORMATION Info = (PFILE_BOTH_DIRECTORY_INFORMATION)malloc(PAGE_SIZE);
@@ -142,13 +150,10 @@ NTSTATUS NtIo_DeleteFolderRecursivelyImpl(POBJECT_ATTRIBUTES objattrs)
 		if (FileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
 			NtIo_RemoveProblematicAttributes(&ntFoundObject.attr);
 
-		if (FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-		{
-			if (FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-				status = NtIo_RemoveJunction(&ntFoundObject.attr);
-			else
-				status = NtIo_DeleteFolderRecursivelyImpl(&ntFoundObject.attr);
-		}
+		if (FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+			status = NtIo_RemoveJunction(&ntFoundObject.attr);
+		else if (FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			status = NtIo_DeleteFolderRecursivelyImpl(&ntFoundObject.attr, cb, param);
 		
 		if (NT_SUCCESS(status))
 			status = NtDeleteFile(&ntFoundObject.attr);
@@ -159,11 +164,11 @@ NTSTATUS NtIo_DeleteFolderRecursivelyImpl(POBJECT_ATTRIBUTES objattrs)
 	return status;
 }
 
-NTSTATUS NtIo_DeleteFolderRecursively(POBJECT_ATTRIBUTES objattrs)
+NTSTATUS NtIo_DeleteFolderRecursively(POBJECT_ATTRIBUTES objattrs, bool (*cb)(const WCHAR* info, void* param), void* param)
 {
 	NtIo_RemoveProblematicAttributes(objattrs);
 
-	NTSTATUS status = NtIo_DeleteFolderRecursivelyImpl(objattrs);
+	NTSTATUS status = NtIo_DeleteFolderRecursivelyImpl(objattrs, cb, param);
 
 	if (NT_SUCCESS(status))
 		status = NtDeleteFile(objattrs);
@@ -187,7 +192,7 @@ NTSTATUS NtIo_RenameFileOrFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIB
 	if (!NT_SUCCESS(status))
 		return status;
 
-	HANDLE dst_handle = NULL; // open destination fodler
+	HANDLE dst_handle = NULL; // open destination folder
 	status = NtCreateFile(&dst_handle, FILE_GENERIC_READ, dest_objattrs, &IoStatusBlock, NULL,
 		0, // for dir? FILE_ATTRIBUTE_NORMAL
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -199,18 +204,16 @@ NTSTATUS NtIo_RenameFileOrFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIB
 		return status;
 
 	// do the rename and retry if needed
-	union {
-		FILE_RENAME_INFORMATION info;
-		WCHAR space[128];
-	} u;
-	u.info.ReplaceIfExists = FALSE;
-	u.info.RootDirectory = dst_handle;
-	u.info.FileNameLength = wcslen(DestName) * sizeof(WCHAR);
-	wcscpy(u.info.FileName, DestName);
+	ULONG InfoSize = sizeof(FILE_RENAME_INFORMATION) + wcslen(DestName) * sizeof(WCHAR) + 16;
+	PFILE_RENAME_INFORMATION pInfo = (PFILE_RENAME_INFORMATION)malloc(InfoSize);
+	pInfo->ReplaceIfExists = FALSE;
+	pInfo->RootDirectory = dst_handle;
+	pInfo->FileNameLength = wcslen(DestName) * sizeof(WCHAR);
+	wcscpy(pInfo->FileName, DestName);
 
 	for (int retries = 0; retries < 20; retries++)
 	{
-		status = NtSetInformationFile(src_handle, &IoStatusBlock, &u.info, sizeof(u), FileRenameInformation);
+		status = NtSetInformationFile(src_handle, &IoStatusBlock, pInfo, InfoSize, FileRenameInformation);
 		/*if (status == STATUS_ACCESS_DENIED || status == STATUS_SHARING_VIOLATION)
 		{
 			// Please terminate programs running in the sandbox before deleting its contents - 3221
@@ -220,6 +223,8 @@ NTSTATUS NtIo_RenameFileOrFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIB
 
 		Sleep(300);
 	}
+
+	free(pInfo);
 
 	NtClose(dst_handle);
 	NtClose(src_handle);
@@ -258,10 +263,13 @@ BOOLEAN NtIo_FileExists(POBJECT_ATTRIBUTES objattrs)
 	return FALSE;
 }
 
-NTSTATUS NtIo_MergeFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIBUTES dest_objattrs)
+NTSTATUS NtIo_MergeFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIBUTES dest_objattrs, bool (*cb)(const WCHAR* info, void* param), void* param)
 {
 	NTSTATUS status = STATUS_SUCCESS;
 	IO_STATUS_BLOCK Iosb;
+
+	if (cb && !cb(src_objattrs->ObjectName->Buffer, param))
+		return STATUS_CANCELLED;
 
 	HANDLE ScrHandle;
 	status = NtCreateFile(&ScrHandle, GENERIC_READ, src_objattrs, &Iosb,
@@ -277,7 +285,7 @@ NTSTATUS NtIo_MergeFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIBUTES de
 
 	for (; status == STATUS_SUCCESS; )
 	{
-		wstring FileName;
+		std::wstring FileName;
 		ULONG FileAttributes;
 
 		PFILE_BOTH_DIRECTORY_INFORMATION Info = (PFILE_BOTH_DIRECTORY_INFORMATION)malloc(PAGE_SIZE);
@@ -320,7 +328,7 @@ NTSTATUS NtIo_MergeFolder(POBJECT_ATTRIBUTES src_objattrs, POBJECT_ATTRIBUTES de
 			if (FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
 				status = NtIo_RenameJunction(&ntSrcObject.attr, dest_objattrs, FileName.c_str());
 			else if (TargetExists)
-				status = NtIo_MergeFolder(&ntSrcObject.attr, &ntDestObject.attr);
+				status = NtIo_MergeFolder(&ntSrcObject.attr, &ntDestObject.attr, cb, param);
 			else
 				status = NtIo_RenameFolder(&ntSrcObject.attr, dest_objattrs, FileName.c_str());
 		}
